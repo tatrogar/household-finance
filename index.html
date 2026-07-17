@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="light dark" />
+  <title>Household Finance</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%92%B5%3C/text%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app viz-root">
+    <header class="app-header">
+      <div>
+        <h1>Household Finance</h1>
+        <p class="subtitle" id="householdName">Garrett &amp; Lizzie</p>
+      </div>
+      <div class="header-actions">
+        <button id="themeToggle" class="ghost-btn" title="Toggle light/dark">◐</button>
+      </div>
+    </header>
+
+    <nav class="tabs" id="tabs">
+      <button data-tab="dashboard" class="tab active">Dashboard</button>
+      <button data-tab="budget" class="tab">Budget</button>
+      <button data-tab="spending" class="tab">Spending</button>
+      <button data-tab="income" class="tab">Income</button>
+      <button data-tab="bills" class="tab">Bills</button>
+      <button data-tab="debts" class="tab">Debts</button>
+      <button data-tab="goals" class="tab">Goals</button>
+      <button data-tab="data" class="tab">Data</button>
+    </nav>
+
+    <main id="main">
+      <section id="tab-dashboard" class="tab-panel active"></section>
+      <section id="tab-budget" class="tab-panel"></section>
+      <section id="tab-spending" class="tab-panel"></section>
+      <section id="tab-income" class="tab-panel"></section>
+      <section id="tab-bills" class="tab-panel"></section>
+      <section id="tab-debts" class="tab-panel"></section>
+      <section id="tab-goals" class="tab-panel"></section>
+      <section id="tab-data" class="tab-panel"></section>
+    </main>
+
+    <div id="tooltip" class="chart-tooltip" hidden></div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
