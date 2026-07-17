@@ -3,67 +3,43 @@
    Recurring Bills / Debts / Savings Goals). Data lives in localStorage. */
 "use strict";
 
-const STORAGE_KEY = "household-finance-v1";
+const STORAGE_KEY = "household-finance-v2";
 const OWNERS = ["Garrett", "Lizzie", "Joint"];
+// Bill frequencies (how often a bill is charged).
 const FREQUENCIES = { Weekly: 52 / 12, "Bi-weekly": 26 / 12, Monthly: 1, Quarterly: 1 / 3, "Semi-annual": 1 / 6, Annual: 1 / 12 };
+// Pay frequencies (how often a paycheck lands), as paychecks-per-month.
+// Bi-weekly (every other week) is 26/yr; twice-a-month (semi-monthly) is 24/yr — they differ.
+const PAY_FREQUENCIES = {
+  "Weekly": 52 / 12,
+  "Every other week": 26 / 12,
+  "Twice a month": 2,
+  "Monthly": 1,
+  "Quarterly": 1 / 3,
+  "Annually": 1 / 12,
+};
 
-// ---------- Seed data (from the Household_Budget_2026 spreadsheet — example figures) ----------
+// A generic starter category list — structure only, no example dollar figures.
+// Limits all start at 0; set them on the Budget tab.
+const STARTER_CATEGORIES = [
+  "Housing", "Utilities", "Groceries", "Dining Out", "Transportation",
+  "Insurance", "Medical", "Pets", "Subscriptions", "Personal - Garrett",
+  "Personal - Lizzie", "Gifts", "Travel", "Household", "Debt Payments",
+  "Savings", "Misc",
+];
 
+// Empty starting state — no example data. Category names are kept as a
+// convenience (all limits 0); every other section starts empty.
 function seedData() {
   let n = 0;
-  const id = () => `seed-${++n}`;
   return {
     household: "Garrett & Lizzie",
-    categories: [
-      { id: id(), name: "Housing", limit: 1800 },
-      { id: id(), name: "Utilities", limit: 350 },
-      { id: id(), name: "Groceries", limit: 700 },
-      { id: id(), name: "Dining Out", limit: 250 },
-      { id: id(), name: "Transportation", limit: 300 },
-      { id: id(), name: "Insurance", limit: 400 },
-      { id: id(), name: "Medical", limit: 150 },
-      { id: id(), name: "Pets", limit: 100 },
-      { id: id(), name: "Subscriptions", limit: 80 },
-      { id: id(), name: "Personal - Garrett", limit: 150 },
-      { id: id(), name: "Personal - Lizzie", limit: 150 },
-      { id: id(), name: "Gifts", limit: 75 },
-      { id: id(), name: "Travel", limit: 200 },
-      { id: id(), name: "Household", limit: 150 },
-      { id: id(), name: "Debt Payments", limit: 600 },
-      { id: id(), name: "Savings", limit: 800 },
-      { id: id(), name: "Misc", limit: 100 },
-    ],
-    spending: [
-      { id: id(), date: "2026-07-01", desc: "HyVee groceries", category: "Groceries", account: "Joint", amount: 120.45 },
-    ],
-    income: [
-      { id: id(), source: "Teaching salary (Blue Valley)", owner: "Garrett", amount: 4200, notes: "Example — replace with actual take-home" },
-      { id: id(), source: "Lizzie's salary", owner: "Lizzie", amount: 4000, notes: "Example — replace" },
-      { id: id(), source: "Side income (advocacy / adjunct)", owner: "Garrett", amount: 0, notes: "Fill in if/when it starts" },
-      { id: id(), source: "Other / interest", owner: "Joint", amount: 0, notes: "" },
-    ],
-    bills: [
-      { id: id(), name: "Mortgage", category: "Housing", paidFrom: "Joint", dueDay: 1, frequency: "Monthly", amount: 1650, autopay: true },
-      { id: id(), name: "Electric / Gas", category: "Utilities", paidFrom: "Joint", dueDay: 15, frequency: "Monthly", amount: 180, autopay: true },
-      { id: id(), name: "Water / Trash", category: "Utilities", paidFrom: "Joint", dueDay: 20, frequency: "Monthly", amount: 70, autopay: true },
-      { id: id(), name: "Internet", category: "Utilities", paidFrom: "Joint", dueDay: 5, frequency: "Monthly", amount: 70, autopay: true },
-      { id: id(), name: "Auto insurance", category: "Insurance", paidFrom: "Joint", dueDay: 10, frequency: "Semi-annual", amount: 720, autopay: true },
-      { id: id(), name: "Homeowners insurance", category: "Insurance", paidFrom: "Joint", dueDay: 1, frequency: "Annual", amount: 1400, autopay: true },
-      { id: id(), name: "Phone plan", category: "Utilities", paidFrom: "Joint", dueDay: 22, frequency: "Monthly", amount: 90, autopay: true },
-      { id: id(), name: "Streaming / subscriptions", category: "Subscriptions", paidFrom: "Joint", dueDay: 12, frequency: "Monthly", amount: 45, autopay: true },
-      { id: id(), name: "Murphy — vet plan / meds", category: "Pets", paidFrom: "Joint", dueDay: 8, frequency: "Monthly", amount: 60, autopay: false },
-    ],
-    debts: [
-      { id: id(), name: "Home mortgage", type: "Mortgage", lender: "Example Lender", rate: 6.25, original: 285000, balance: 262000, asset: 340000, minPayment: 1650 },
-      { id: id(), name: "Auto loan", type: "Auto", lender: "Example CU", rate: 4.9, original: 28000, balance: 17500, asset: 22000, minPayment: 450 },
-      { id: id(), name: "Student loan — Garrett", type: "Student", lender: "Example Servicer", rate: 5.5, original: 32000, balance: 24000, asset: null, minPayment: 280 },
-    ],
-    goals: [
-      { id: id(), name: "Emergency fund (6 mo)", target: 25000, saved: 8000, monthly: 400, notes: "3–6 months of expenses" },
-      { id: id(), name: "Portugal relocation fund", target: 30000, saved: 5000, monthly: 300, notes: "Visa fees, flights, deposits" },
-      { id: id(), name: "Adoption fund", target: 20000, saved: 2000, monthly: 300, notes: "Adjust as you learn actual costs" },
-      { id: id(), name: "Travel / annual trip", target: 3000, saved: 500, monthly: 100, notes: "" },
-    ],
+    categories: STARTER_CATEGORIES.map((name) => ({ id: `seed-${++n}`, name, limit: 0 })),
+    spending: [],
+    income: [],          // recurring paychecks: { id, source, owner, frequency, amount, notes } — amount is per paycheck
+    oneTimeIncome: [],   // one-off income: { id, source, owner, date, amount, notes }
+    bills: [],
+    debts: [],
+    goals: [],
   };
 }
 
@@ -75,6 +51,12 @@ try {
 } catch {
   state = seedData();
 }
+// Normalize shape (covers older/imported data): guarantee every section array
+// exists, and give any recurring-income row without a pay frequency a default.
+for (const k of ["categories", "spending", "income", "oneTimeIncome", "bills", "debts", "goals"]) {
+  if (!Array.isArray(state[k])) state[k] = [];
+}
+state.income.forEach((r) => { if (!r.frequency) r.frequency = "Monthly"; });
 
 function save() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
@@ -89,8 +71,14 @@ let editing = {}; // per-entity id currently loaded into the tab's form
 // ---------- Derived values ----------
 
 const monthlyEquivalent = (b) => b.amount * (FREQUENCIES[b.frequency] ?? 1);
-const totalIncome = () => state.income.reduce((s, r) => s + r.amount, 0);
-const incomeByOwner = (owner) => state.income.filter((r) => r.owner === owner).reduce((s, r) => s + r.amount, 0);
+// Recurring income: the entered amount is per paycheck; convert to a monthly figure.
+const incomeMonthly = (r) => r.amount * (PAY_FREQUENCIES[r.frequency] ?? 1);
+const totalIncome = () => state.income.reduce((s, r) => s + incomeMonthly(r), 0);
+const incomeByOwner = (owner) => state.income.filter((r) => r.owner === owner).reduce((s, r) => s + incomeMonthly(r), 0);
+// One-time income landing in a given month (YYYY-MM).
+const oneTimeIn = (month, owner) => state.oneTimeIncome
+  .filter((r) => r.date.slice(0, 7) === month && (!owner || r.owner === owner))
+  .reduce((s, r) => s + r.amount, 0);
 const totalBills = () => state.bills.reduce((s, b) => s + monthlyEquivalent(b), 0);
 const totalMinPayments = () => state.debts.reduce((s, d) => s + d.minPayment, 0);
 const totalGoalContributions = () => state.goals.reduce((s, g) => s + g.monthly, 0);
@@ -443,30 +431,68 @@ function renderSpending(el) {
 
 function renderIncome(el) {
   const e = editing.income ? state.income.find((r) => r.id === editing.income) : null;
+  const eo = editing.oneTime ? state.oneTimeIncome.find((r) => r.id === editing.oneTime) : null;
+  const today = new Date().toISOString().slice(0, 10);
+  const payFreqOptions = (selected) => Object.keys(PAY_FREQUENCIES)
+    .map((fq) => `<option ${fq === (selected ?? "Twice a month") ? "selected" : ""}>${fq}</option>`).join("");
+  const oneTimeRows = [...state.oneTimeIncome].sort((a, b) => b.date.localeCompare(a.date));
+  const oneTimeTotal = oneTimeRows.reduce((s, r) => s + r.amount, 0);
+
   el.innerHTML = `
     <div class="card">
-      <h2>Monthly income — his / hers / joint</h2>
-      <p class="card-note">List each source's monthly take-home. Owner totals and the household total update automatically.</p>
+      <h2>${e ? "Edit paycheck" : "Recurring income (paychecks)"}</h2>
+      <p class="card-note">Enter the take-home amount of a single paycheck and how often it lands. The monthly figure is computed for you — twice a month means ×2, every other week means ×2.17 (26 checks a year).</p>
       <form id="incomeForm" class="form-grid">
-        <div class="field"><label>Source</label><input name="source" required value="${esc(e?.source ?? "")}" placeholder="e.g. Salary"></div>
+        <div class="field"><label>Source</label><input name="source" required value="${esc(e?.source ?? "")}" placeholder="e.g. Teaching salary"></div>
         <div class="field"><label>Owner</label><select name="owner">${ownerOptions(e?.owner)}</select></div>
-        <div class="field"><label>Monthly amount</label><input name="amount" type="number" step="0.01" min="0" required value="${e?.amount ?? ""}"></div>
+        <div class="field"><label>Pay frequency</label><select name="frequency">${payFreqOptions(e?.frequency)}</select></div>
+        <div class="field"><label>Amount per paycheck</label><input name="amount" type="number" step="0.01" min="0" required value="${e?.amount ?? ""}"></div>
         <div class="field"><label>Notes</label><input name="notes" value="${esc(e?.notes ?? "")}"></div>
-        <button class="primary-btn">${e ? "Update" : "Add source"}</button>
+        <button class="primary-btn">${e ? "Update" : "Add paycheck"}</button>
         ${e ? `<button type="button" class="secondary-btn" id="cancelIncome">Cancel</button>` : ""}
       </form>
       <div class="table-wrap"><table>
-        <thead><tr><th>Source</th><th>Owner</th><th class="num">Monthly (take-home)</th><th>Notes</th><th></th></tr></thead>
+        <thead><tr><th>Source</th><th>Owner</th><th>Frequency</th><th class="num">Per paycheck</th><th class="num">Monthly</th><th>Notes</th><th></th></tr></thead>
         <tbody>
           ${state.income.map((r) => `<tr>
             <td>${esc(r.source)}</td>
             <td class="secondary">${esc(r.owner)}</td>
+            <td class="secondary">${esc(r.frequency)}</td>
+            <td class="num">${fmtMoney(r.amount, true)}</td>
+            <td class="num">${fmtMoney(incomeMonthly(r), true)}</td>
+            <td class="muted">${esc(r.notes)}</td>
+            <td class="row-actions"><button data-edit-inc="${r.id}">Edit</button><button data-del-inc="${r.id}">Delete</button></td>
+          </tr>`).join("") || `<tr><td colspan="7" class="empty-note">No paychecks yet — add one above.</td></tr>`}
+          ${state.income.length ? OWNERS.map((o) => incomeByOwner(o) > 0
+            ? `<tr><td class="secondary">${o} total</td><td></td><td></td><td></td><td class="num">${fmtMoney(incomeByOwner(o), true)}</td><td></td><td></td></tr>` : "").join("") : ""}
+          ${state.income.length ? `<tr class="total-row"><td>TOTAL HOUSEHOLD / MO</td><td></td><td></td><td></td><td class="num">${fmtMoney(totalIncome(), true)}</td><td></td><td></td></tr>` : ""}
+        </tbody>
+      </table></div>
+    </div>
+    <div class="card">
+      <h2>${eo ? "Edit one-time income" : "One-time & extra income"}</h2>
+      <p class="card-note">Bonuses, gifts, tax refunds, one-off side jobs — money that isn't a regular paycheck. Each entry counts only in the month of its date, not every month.</p>
+      <form id="oneTimeForm" class="form-grid">
+        <div class="field"><label>Date</label><input name="date" type="date" required value="${eo?.date ?? today}"></div>
+        <div class="field"><label>Source</label><input name="source" required value="${esc(eo?.source ?? "")}" placeholder="e.g. Tax refund"></div>
+        <div class="field"><label>Owner</label><select name="owner">${ownerOptions(eo?.owner ?? "Joint")}</select></div>
+        <div class="field"><label>Amount</label><input name="amount" type="number" step="0.01" min="0.01" required value="${eo?.amount ?? ""}"></div>
+        <div class="field"><label>Notes</label><input name="notes" value="${esc(eo?.notes ?? "")}"></div>
+        <button class="primary-btn">${eo ? "Update" : "Add income"}</button>
+        ${eo ? `<button type="button" class="secondary-btn" id="cancelOneTime">Cancel</button>` : ""}
+      </form>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Date</th><th>Source</th><th>Owner</th><th class="num">Amount</th><th>Notes</th><th></th></tr></thead>
+        <tbody>
+          ${oneTimeRows.map((r) => `<tr>
+            <td class="secondary" style="white-space:nowrap">${r.date}</td>
+            <td>${esc(r.source)}</td>
+            <td class="secondary">${esc(r.owner)}</td>
             <td class="num">${fmtMoney(r.amount, true)}</td>
             <td class="muted">${esc(r.notes)}</td>
-            <td class="row-actions"><button data-edit="${r.id}">Edit</button><button data-del="${r.id}">Delete</button></td>
-          </tr>`).join("")}
-          ${OWNERS.map((o) => `<tr><td class="secondary">${o} total</td><td></td><td class="num">${fmtMoney(incomeByOwner(o), true)}</td><td></td><td></td></tr>`).join("")}
-          <tr class="total-row"><td>TOTAL HOUSEHOLD / MO</td><td></td><td class="num">${fmtMoney(totalIncome(), true)}</td><td></td><td></td></tr>
+            <td class="row-actions"><button data-edit-ot="${r.id}">Edit</button><button data-del-ot="${r.id}">Delete</button></td>
+          </tr>`).join("") || `<tr><td colspan="6" class="empty-note">No one-time income logged.</td></tr>`}
+          ${oneTimeRows.length ? `<tr class="total-row"><td>TOTAL LOGGED</td><td></td><td></td><td class="num">${fmtMoney(oneTimeTotal, true)}</td><td></td><td></td></tr>` : ""}
         </tbody>
       </table></div>
     </div>`;
@@ -474,15 +500,30 @@ function renderIncome(el) {
   el.querySelector("#incomeForm").addEventListener("submit", (ev) => {
     ev.preventDefault();
     const f = new FormData(ev.target);
-    const rec = { source: f.get("source").trim(), owner: f.get("owner"), amount: +f.get("amount"), notes: f.get("notes").trim() };
+    const rec = { source: f.get("source").trim(), owner: f.get("owner"), frequency: f.get("frequency"), amount: +f.get("amount"), notes: f.get("notes").trim() };
     if (e) { Object.assign(e, rec); editing.income = null; }
     else state.income.push({ id: uid(), ...rec });
     save(); renderAll();
   });
   el.querySelector("#cancelIncome")?.addEventListener("click", () => { editing.income = null; renderAll(); });
-  el.querySelectorAll("[data-edit]").forEach((b) => b.addEventListener("click", () => { editing.income = b.dataset.edit; renderAll(); }));
-  el.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", () => {
-    state.income = state.income.filter((r) => r.id !== b.dataset.del);
+  el.querySelectorAll("[data-edit-inc]").forEach((b) => b.addEventListener("click", () => { editing.income = b.dataset.editInc; renderAll(); }));
+  el.querySelectorAll("[data-del-inc]").forEach((b) => b.addEventListener("click", () => {
+    state.income = state.income.filter((r) => r.id !== b.dataset.delInc);
+    save(); renderAll();
+  }));
+
+  el.querySelector("#oneTimeForm").addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const f = new FormData(ev.target);
+    const rec = { date: f.get("date"), source: f.get("source").trim(), owner: f.get("owner"), amount: +f.get("amount"), notes: f.get("notes").trim() };
+    if (eo) { Object.assign(eo, rec); editing.oneTime = null; }
+    else state.oneTimeIncome.push({ id: uid(), ...rec });
+    save(); renderAll();
+  });
+  el.querySelector("#cancelOneTime")?.addEventListener("click", () => { editing.oneTime = null; renderAll(); });
+  el.querySelectorAll("[data-edit-ot]").forEach((b) => b.addEventListener("click", () => { editing.oneTime = b.dataset.editOt; renderAll(); }));
+  el.querySelectorAll("[data-del-ot]").forEach((b) => b.addEventListener("click", () => {
+    state.oneTimeIncome = state.oneTimeIncome.filter((r) => r.id !== b.dataset.delOt);
     save(); renderAll();
   }));
 }
@@ -695,13 +736,13 @@ function renderData(el) {
         <button id="exportBtn" class="primary-btn">Export JSON</button>
         <button id="importBtn" class="secondary-btn">Import from box below</button>
         <div class="spacer"></div>
-        <button id="resetBtn" class="danger-btn">Reset to spreadsheet seed</button>
+        <button id="resetBtn" class="danger-btn">Clear all data</button>
       </div>
       <textarea id="ioArea" class="io-area" placeholder="Paste an exported backup here, then press Import."></textarea>
     </div>
     <div class="card">
       <h2>About</h2>
-      <p class="card-note">Modeled on the Household_Budget_2026 workbook. The seed figures are the spreadsheet's examples — replace them with your real numbers. Expenses logged on the Spending tab drive the Budget actuals and the Dashboard automatically.</p>
+      <p class="card-note">A local-first household budget app. Add your paychecks and one-time income on the Income tab, set category limits on the Budget tab, and log expenses on the Spending tab — those drive the Budget actuals and the Dashboard automatically.</p>
     </div>`;
 
   el.querySelector("#householdForm").addEventListener("submit", (ev) => {
@@ -725,14 +766,19 @@ function renderData(el) {
       const keys = ["categories", "spending", "income", "bills", "debts", "goals"];
       if (!keys.every((k) => Array.isArray(data[k]))) throw new Error("missing sections");
       if (!confirm("Replace ALL current data with this backup?")) return;
-      state = { household: String(data.household ?? "Household"), ...Object.fromEntries(keys.map((k) => [k, data[k]])) };
+      state = {
+        household: String(data.household ?? "Household"),
+        ...Object.fromEntries(keys.map((k) => [k, data[k]])),
+        oneTimeIncome: Array.isArray(data.oneTimeIncome) ? data.oneTimeIncome : [],
+      };
+      state.income.forEach((r) => { if (!r.frequency) r.frequency = "Monthly"; });
       save(); renderAll();
     } catch {
       alert("That doesn't look like a valid backup file.");
     }
   });
   el.querySelector("#resetBtn").addEventListener("click", () => {
-    if (!confirm("Delete ALL data and restore the spreadsheet's example figures?")) return;
+    if (!confirm("Delete ALL data and start from an empty app? This cannot be undone.")) return;
     state = seedData();
     save(); renderAll();
   });
