@@ -90,6 +90,17 @@ body {
 }
 .ghost-btn:hover { background: var(--surface-1); }
 
+.header-actions { display: flex; align-items: center; gap: 8px; }
+.sync-badge {
+  font-size: 12px;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  white-space: nowrap;
+}
+.sync-badge.err { color: var(--status-critical); border-color: var(--status-critical); }
+
 /* Tabs */
 .tabs {
   display: flex;

@@ -57,9 +57,209 @@ for (const k of ["categories", "spending", "income", "oneTimeIncome", "bills", "
   if (!Array.isArray(state[k])) state[k] = [];
 }
 state.income.forEach((r) => { if (!r.frequency) r.frequency = "Monthly"; });
+if (typeof state.updatedAt !== "number") state.updatedAt = 0;
 
-function save() {
+// Write to localStorage WITHOUT touching the change clock — used when adopting a
+// cloud copy, where we want to keep the cloud's timestamp rather than stamp a new one.
+function persist() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+}
+// A local edit: stamp the change clock, persist, and nudge a cloud sync.
+function save() {
+  state.updatedAt = Date.now();
+  persist();
+  scheduleSyncSoon();
+}
+
+// ---------- Cloud sync (private GitHub Gist) — mirrors the Spanish app ----------
+
+const SYNC_KEY = "household-finance-sync";
+const GIST_FILE = "household-finance-state.json";
+const GIST_DESCRIPTION = "Household Finance sync state";
+const GH_API = "https://api.github.com";
+const AUTO_SYNC_MS = 90 * 1000;   // background poll for the other person's changes
+const PUSH_DEBOUNCE_MS = 4000;    // push shortly after you stop editing
+
+let syncCfg;
+try { syncCfg = JSON.parse(localStorage.getItem(SYNC_KEY)) || {}; } catch { syncCfg = {}; }
+const saveSyncCfg = () => localStorage.setItem(SYNC_KEY, JSON.stringify(syncCfg));
+
+let syncing = false;
+let syncStatus = "off";   // off | syncing | ok | error
+let syncMessage = "";
+let pushTimer = null;
+let pollTimer = null;
+
+const isConnected = () => Boolean(syncCfg.token && syncCfg.gistId);
+const gistWebUrl = () => `https://gist.github.com/${syncCfg.login || ""}/${syncCfg.gistId || ""}`;
+
+function ghHeaders(token) {
+  return { Authorization: `Bearer ${token}`, Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28" };
+}
+
+async function ghVerifyToken(token) {
+  const res = await fetch(`${GH_API}/user`, { headers: ghHeaders(token) });
+  if (res.status === 401) throw new Error("Token rejected — make sure it has the 'gist' scope.");
+  if (!res.ok) throw new Error(`GitHub error ${res.status}`);
+  return (await res.json()).login;
+}
+
+async function ghFindOrCreateGist(token) {
+  const list = await fetch(`${GH_API}/gists?per_page=100`, { headers: ghHeaders(token) });
+  if (!list.ok) throw new Error(`Listing gists failed (${list.status})`);
+  const existing = (await list.json()).find((g) => g.files && GIST_FILE in g.files);
+  if (existing) return existing.id;
+  const created = await fetch(`${GH_API}/gists`, {
+    method: "POST",
+    headers: { ...ghHeaders(token), "Content-Type": "application/json" },
+    body: JSON.stringify({ description: GIST_DESCRIPTION, public: false, files: { [GIST_FILE]: { content: "{}" } } }),
+  });
+  if (!created.ok) throw new Error(`Creating the gist failed (${created.status})`);
+  return (await created.json()).id;
+}
+
+async function ghPullGist() {
+  const res = await fetch(`${GH_API}/gists/${syncCfg.gistId}`, { headers: ghHeaders(syncCfg.token) });
+  if (res.status === 401) throw new Error("Token no longer valid — reconnect on the Data tab.");
+  if (!res.ok) throw new Error(`Pull failed (${res.status})`);
+  const content = (await res.json()).files?.[GIST_FILE]?.content;
+  if (!content) return null;
+  try { return JSON.parse(content); } catch { return null; }
+}
+
+async function ghPushGist(content) {
+  const res = await fetch(`${GH_API}/gists/${syncCfg.gistId}`, {
+    method: "PATCH",
+    headers: { ...ghHeaders(syncCfg.token), "Content-Type": "application/json" },
+    body: JSON.stringify({ files: { [GIST_FILE]: { content } } }),
+  });
+  if (!res.ok) throw new Error(`Push failed (${res.status})`);
+}
+
+function buildSyncPayload() {
+  return JSON.stringify({
+    version: 2,
+    updatedAt: state.updatedAt ?? Date.now(),
+    household: state.household,
+    categories: state.categories, spending: state.spending,
+    income: state.income, oneTimeIncome: state.oneTimeIncome,
+    bills: state.bills, debts: state.debts, goals: state.goals,
+  });
+}
+
+// Replace local data with a cloud copy, keeping the cloud's change clock.
+function adoptRemote(remote) {
+  const arr = (v) => (Array.isArray(v) ? v : []);
+  state = {
+    household: String(remote.household ?? "Our Household"),
+    categories: arr(remote.categories), spending: arr(remote.spending),
+    income: arr(remote.income), oneTimeIncome: arr(remote.oneTimeIncome),
+    bills: arr(remote.bills), debts: arr(remote.debts), goals: arr(remote.goals),
+    updatedAt: typeof remote.updatedAt === "number" ? remote.updatedAt : Date.now(),
+  };
+  state.income.forEach((r) => { if (!r.frequency) r.frequency = "Monthly"; });
+  persist();
+  syncCfg.lastSyncedStamp = state.updatedAt;
+  saveSyncCfg();
+  renderAll();
+}
+
+function setSyncStatus(status, message = "") {
+  syncStatus = status;
+  syncMessage = message;
+  updateSyncBadge();
+  if (activeTab === "data") {
+    const line = document.getElementById("syncStatusLine");
+    if (line) line.innerHTML = syncStatusHtml();
+  }
+}
+
+// One reconciliation pass: adopt the cloud if it's newer, else push if we have
+// unsynced local edits. Whole-document last-writer-wins, keyed on the timestamp.
+async function syncTick() {
+  if (!isConnected() || syncing) return;
+  syncing = true;
+  setSyncStatus("syncing");
+  try {
+    const remote = await ghPullGist();
+    const remoteStamp = remote?.updatedAt ?? 0;
+    const localStamp = state.updatedAt ?? 0;
+    if (remote && remoteStamp > localStamp) {
+      adoptRemote(remote);
+    } else if (localStamp > (syncCfg.lastSyncedStamp ?? 0) || !remote) {
+      await ghPushGist(buildSyncPayload());
+      syncCfg.lastSyncedStamp = localStamp;
+    }
+    syncCfg.lastSyncedAt = new Date().toISOString();
+    saveSyncCfg();
+    setSyncStatus("ok");
+  } catch (e) {
+    setSyncStatus("error", e.message || String(e));
+  } finally {
+    syncing = false;
+  }
+}
+
+function scheduleSyncSoon() {
+  if (!isConnected()) return;
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(syncTick, PUSH_DEBOUNCE_MS);
+}
+
+function startAutoSync() {
+  clearInterval(pollTimer);
+  if (!isConnected()) return;
+  pollTimer = setInterval(syncTick, AUTO_SYNC_MS);
+}
+
+async function connectSync(token) {
+  const login = await ghVerifyToken(token);
+  const gistId = await ghFindOrCreateGist(token);
+  syncCfg = { token, gistId, login, lastSyncedStamp: 0 };
+  saveSyncCfg();
+  // Bootstrap: adopt existing cloud data if present, otherwise seed the cloud.
+  const remote = await ghPullGist();
+  const remoteHasData = remote && ["categories", "spending", "income", "oneTimeIncome", "bills", "debts", "goals"]
+    .some((k) => Array.isArray(remote[k]) && remote[k].length);
+  if (remoteHasData) {
+    const takeCloud = confirm("This household already has data in the cloud.\n\nOK = use the cloud copy on this device.\nCancel = keep THIS device's data and overwrite the cloud.");
+    if (takeCloud) { adoptRemote(remote); }
+    else { state.updatedAt = Date.now(); persist(); await ghPushGist(buildSyncPayload()); syncCfg.lastSyncedStamp = state.updatedAt; saveSyncCfg(); }
+  } else {
+    state.updatedAt = Date.now(); persist();
+    await ghPushGist(buildSyncPayload());
+    syncCfg.lastSyncedStamp = state.updatedAt; saveSyncCfg();
+  }
+  syncCfg.lastSyncedAt = new Date().toISOString();
+  saveSyncCfg();
+  setSyncStatus("ok");
+  startAutoSync();
+}
+
+function disconnectSync() {
+  clearInterval(pollTimer);
+  clearTimeout(pushTimer);
+  syncCfg = {};
+  saveSyncCfg();
+  setSyncStatus("off");
+}
+
+function updateSyncBadge() {
+  const b = document.getElementById("syncBadge");
+  if (!b) return;
+  if (!isConnected()) { b.hidden = true; return; }
+  b.hidden = false;
+  b.textContent = syncStatus === "syncing" ? "⟳ Syncing…" : syncStatus === "error" ? "⚠ Sync error" : "☁ Synced";
+  b.className = "sync-badge" + (syncStatus === "error" ? " err" : "");
+  b.title = syncStatus === "error" ? syncMessage
+    : syncCfg.lastSyncedAt ? `Last synced ${new Date(syncCfg.lastSyncedAt).toLocaleTimeString()}` : "Connected";
+}
+
+function syncStatusHtml() {
+  if (!isConnected()) return "";
+  const when = syncCfg.lastSyncedAt ? new Date(syncCfg.lastSyncedAt).toLocaleString() : "not yet";
+  const label = syncStatus === "syncing" ? "Syncing…" : syncStatus === "error" ? `Error: ${esc(syncMessage)}` : "Up to date";
+  return `Connected as <strong>${esc(syncCfg.login || "?")}</strong> · ${esc(label)} · last synced ${esc(when)}`;
 }
 
 const uid = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
@@ -730,6 +930,26 @@ function renderData(el) {
       </form>
     </div>
     <div class="card">
+      <h2>Sync across devices</h2>
+      ${isConnected() ? `
+        <p class="card-note" id="syncStatusLine">${syncStatusHtml()}</p>
+        <p class="card-note">Changes sync automatically every couple of minutes, and a few seconds after you edit. Press “Sync now” to update this instant.</p>
+        <div class="toolbar">
+          <button id="syncNowBtn" class="primary-btn">Sync now</button>
+          <a class="secondary-btn" href="${esc(gistWebUrl())}" target="_blank" rel="noopener">View cloud data</a>
+          <div class="spacer"></div>
+          <button id="syncDisconnectBtn" class="secondary-btn">Disconnect</button>
+        </div>
+      ` : `
+        <p class="card-note">Share this household between you and Lizzie through a private GitHub Gist — the same mechanism as the Spanish app. Both devices then stay in step automatically.</p>
+        <div class="form-grid">
+          <div class="field" style="flex:1 1 260px"><label>GitHub token (gist scope only)</label><input id="syncToken" type="password" placeholder="ghp_… or github_pat_…" autocomplete="off"></div>
+          <button id="syncConnectBtn" class="primary-btn">Connect</button>
+        </div>
+        <p class="card-note"><a href="https://github.com/settings/tokens/new?scopes=gist&description=Household%20Finance%20sync" target="_blank" rel="noopener">Create a token →</a> Both of you connect with the <strong>same GitHub account</strong> (or paste the same token) so you share one cloud copy. The token is stored only in this browser.</p>
+      `}
+    </div>
+    <div class="card">
       <h2>Backup &amp; restore</h2>
       <p class="card-note">Everything is stored locally in this browser. Export a JSON backup to move it to another device, or paste a backup below and import it.</p>
       <div class="toolbar">
@@ -782,6 +1002,32 @@ function renderData(el) {
     state = seedData();
     save(); renderAll();
   });
+
+  // Sync controls
+  el.querySelector("#syncConnectBtn")?.addEventListener("click", async () => {
+    const input = el.querySelector("#syncToken");
+    const tok = input.value.trim();
+    if (!tok) return alert("Paste your GitHub token first.");
+    const btn = el.querySelector("#syncConnectBtn");
+    btn.disabled = true; btn.textContent = "Connecting…";
+    try {
+      await connectSync(tok);
+      renderAll();
+    } catch (e) {
+      alert("Couldn't connect: " + (e.message || e));
+      btn.disabled = false; btn.textContent = "Connect";
+    }
+  });
+  el.querySelector("#syncNowBtn")?.addEventListener("click", async () => {
+    const btn = el.querySelector("#syncNowBtn");
+    btn.disabled = true;
+    await syncTick();
+    renderAll();
+  });
+  el.querySelector("#syncDisconnectBtn")?.addEventListener("click", () => {
+    if (!confirm("Stop syncing on this device? Your data stays here — it just won't sync until you reconnect.")) return;
+    disconnectSync(); renderAll();
+  });
 }
 
 // ---------- Shell ----------
@@ -808,6 +1054,7 @@ function renderAll() {
     else panel.innerHTML = "";
   }
   document.querySelectorAll(".tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === activeTab));
+  updateSyncBadge();
 }
 
 document.getElementById("tabs").addEventListener("click", (ev) => {
@@ -830,3 +1077,11 @@ document.getElementById("themeToggle").addEventListener("click", () => {
 }
 
 renderAll();
+
+// Kick off cloud sync if this device is already connected: pull others' changes
+// on load, then poll in the background.
+if (isConnected()) {
+  setSyncStatus("ok");
+  syncTick();
+  startAutoSync();
+}
