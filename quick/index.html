@@ -1,0 +1,95 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <meta name="theme-color" content="#0b0b0b" />
+  <title>Quick Expense</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%92%B8%3C/text%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="../styles.css" />
+  <style>
+    .quick { max-width: 520px; }
+    .q-header { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 8px 0 16px; }
+    .q-header h1 { font-size: 22px; font-weight: 650; }
+    .q-form { display: flex; flex-direction: column; gap: 14px; background: var(--surface-1); border: 1px solid var(--border); border-radius: 14px; padding: 16px; }
+    .q-field { display: flex; flex-direction: column; gap: 6px; }
+    .q-field label { font-size: 13px; color: var(--text-secondary); }
+    .q-form input, .q-form select { font: inherit; font-size: 17px; padding: 12px; border-radius: 10px; border: 1px solid var(--axis); background: var(--page); color: var(--text-primary); width: 100%; }
+    .q-form input:focus, .q-form select:focus { outline: 2px solid var(--series-1); outline-offset: 1px; border-color: transparent; }
+    .q-amount input { font-size: 28px; font-weight: 600; }
+    .q-row { display: flex; gap: 12px; }
+    .q-row .q-field { flex: 1; min-width: 0; }
+    .q-add { font-size: 18px; font-weight: 650; background: var(--series-1); color: #fff; border: none; border-radius: 12px; padding: 16px; cursor: pointer; margin-top: 2px; }
+    .q-add:active { filter: brightness(1.1); }
+    .q-toast { position: fixed; left: 50%; transform: translateX(-50%); bottom: 24px; background: var(--status-good); color: #fff; padding: 12px 20px; border-radius: 999px; font-weight: 600; font-size: 15px; box-shadow: 0 6px 24px rgba(0,0,0,.25); z-index: 20; }
+    .q-toast.warn { background: var(--status-warning); color: #201a00; }
+    .q-toast.err { background: var(--status-critical); }
+    .q-recent { margin-top: 22px; }
+    .q-recent h2 { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 8px; }
+    #recentList { list-style: none; display: flex; flex-direction: column; gap: 4px; padding: 0; }
+    #recentList li { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 10px 12px; background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; }
+    .q-r-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    .q-r-desc { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .q-r-cat { font-size: 12px; color: var(--text-muted); }
+    .q-r-amt { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .q-empty { color: var(--text-muted); justify-content: center !important; }
+    .q-sync { margin-top: 22px; font-size: 14px; }
+    .q-sync summary { cursor: pointer; color: var(--text-secondary); padding: 8px 0; }
+    .q-syncbody { padding: 8px 0; display: flex; flex-direction: column; gap: 10px; }
+    .q-syncbody .muted { color: var(--text-muted); font-size: 13px; }
+    .q-btn { font: inherit; font-size: 15px; padding: 11px 16px; border-radius: 10px; cursor: pointer; }
+    .q-btn.primary { background: var(--series-1); color: #fff; border: none; font-weight: 600; }
+    .q-btn.ghost { background: none; border: 1px solid var(--axis); color: var(--text-secondary); }
+    .q-fulllink { display: inline-block; margin-top: 18px; color: var(--series-1); text-decoration: none; font-size: 14px; }
+  </style>
+</head>
+<body>
+  <div class="app viz-root quick">
+    <header class="q-header">
+      <h1>Quick Expense</h1>
+      <span id="syncBadge" class="sync-badge" hidden></span>
+    </header>
+
+    <form id="expForm" class="q-form" autocomplete="off">
+      <div class="q-field q-amount">
+        <label for="amount">Amount</label>
+        <input id="amount" name="amount" type="number" inputmode="decimal" step="0.01" min="0.01" placeholder="0.00" required />
+      </div>
+      <div class="q-field">
+        <label for="desc">Description</label>
+        <input id="desc" name="desc" type="text" placeholder="e.g. HyVee groceries" required />
+      </div>
+      <div class="q-row">
+        <div class="q-field">
+          <label for="category">Category</label>
+          <select id="category" name="category"></select>
+        </div>
+        <div class="q-field">
+          <label for="account">Account</label>
+          <select id="account" name="account"></select>
+        </div>
+      </div>
+      <div class="q-field">
+        <label for="date">Date</label>
+        <input id="date" name="date" type="date" required />
+      </div>
+      <button class="q-add" type="submit">Add expense</button>
+    </form>
+
+    <section class="q-recent">
+      <h2>Recent</h2>
+      <ul id="recentList"></ul>
+    </section>
+
+    <details class="q-sync">
+      <summary>Sync setup</summary>
+      <div class="q-syncbody" id="syncArea"></div>
+    </details>
+
+    <a class="q-fulllink" href="../">Open the full app →</a>
+    <div id="toast" class="q-toast" hidden></div>
+  </div>
+  <script src="quick.js"></script>
+</body>
+</html>
