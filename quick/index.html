@@ -42,6 +42,19 @@
     .q-btn.primary { background: var(--series-1); color: #fff; border: none; font-weight: 600; }
     .q-btn.ghost { background: none; border: 1px solid var(--axis); color: var(--text-secondary); }
     .q-fulllink { display: inline-block; margin-top: 18px; color: var(--series-1); text-decoration: none; font-size: 14px; }
+    .q-modes { display: flex; gap: 4px; background: var(--surface-1); border: 1px solid var(--border); border-radius: 10px; padding: 4px; margin-bottom: 14px; }
+    .q-mode { flex: 1; font: inherit; font-size: 15px; padding: 9px; border: none; border-radius: 7px; background: none; color: var(--text-secondary); cursor: pointer; }
+    .q-mode.active { background: var(--series-1); color: #fff; font-weight: 600; }
+    .q-splitline { border: 1px solid var(--border); border-radius: 10px; padding: 10px; margin-bottom: 8px; display: flex; flex-direction: column; gap: 8px; background: var(--page); }
+    .q-splitrow { display: flex; gap: 8px; align-items: center; }
+    .q-splitrow .sp-cat { flex: 1; min-width: 0; font-size: 16px; padding: 9px; border-radius: 8px; border: 1px solid var(--axis); background: var(--surface-1); color: var(--text-primary); }
+    .q-splitrow .sp-amt { width: 92px; font-size: 16px; padding: 9px; border-radius: 8px; border: 1px solid var(--axis); background: var(--surface-1); color: var(--text-primary); }
+    .sp-desc { font: inherit; font-size: 15px; padding: 9px; border-radius: 8px; border: 1px solid var(--axis); background: var(--surface-1); color: var(--text-primary); width: 100%; }
+    .sp-taxwrap { display: flex; align-items: center; gap: 4px; font-size: 13px; color: var(--text-secondary); white-space: nowrap; }
+    .sp-del { background: none; border: none; color: var(--text-muted); font-size: 16px; cursor: pointer; padding: 4px; }
+    .sp-withtax { font-size: 12px; }
+    #splitSection #spTaxMode { width: auto; flex: 0 0 auto; }
+    #splitSection #spTaxValue { width: auto; flex: 1; }
   </style>
 </head>
 <body>
@@ -51,31 +64,40 @@
       <span id="syncBadge" class="sync-badge" hidden></span>
     </header>
 
-    <form id="expForm" class="q-form" autocomplete="off">
-      <div class="q-field q-amount">
-        <label for="amount">Amount</label>
-        <input id="amount" name="amount" type="number" inputmode="decimal" step="0.01" min="0.01" placeholder="0.00" required />
-      </div>
-      <div class="q-field">
-        <label for="desc">Description</label>
-        <input id="desc" name="desc" type="text" placeholder="e.g. HyVee groceries" required />
-      </div>
-      <div class="q-row">
-        <div class="q-field">
-          <label for="category">Category</label>
-          <select id="category" name="category"></select>
+    <div class="q-modes">
+      <button type="button" class="q-mode active" data-mode="single">Single</button>
+      <button type="button" class="q-mode" data-mode="split">Split receipt</button>
+    </div>
+
+    <section id="singleSection">
+      <form id="expForm" class="q-form" autocomplete="off">
+        <div class="q-field q-amount">
+          <label for="amount">Amount</label>
+          <input id="amount" name="amount" type="number" inputmode="decimal" step="0.01" min="0.01" placeholder="0.00" required />
         </div>
         <div class="q-field">
-          <label for="account">Account</label>
-          <select id="account" name="account"></select>
+          <label for="desc">Description</label>
+          <input id="desc" name="desc" type="text" placeholder="e.g. HyVee groceries" required />
         </div>
-      </div>
-      <div class="q-field">
-        <label for="date">Date</label>
-        <input id="date" name="date" type="date" required />
-      </div>
-      <button class="q-add" type="submit">Add expense</button>
-    </form>
+        <div class="q-row">
+          <div class="q-field">
+            <label for="category">Category</label>
+            <select id="category" name="category"></select>
+          </div>
+          <div class="q-field">
+            <label for="account">Account</label>
+            <select id="account" name="account"></select>
+          </div>
+        </div>
+        <div class="q-field">
+          <label for="date">Date</label>
+          <input id="date" name="date" type="date" required />
+        </div>
+        <button class="q-add" type="submit">Add expense</button>
+      </form>
+    </section>
+
+    <section id="splitSection" hidden></section>
 
     <section class="q-recent">
       <h2>Recent</h2>

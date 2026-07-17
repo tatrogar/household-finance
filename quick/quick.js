@@ -11,18 +11,23 @@ const GIST_FILE = "household-finance-state.json";
 const GIST_DESCRIPTION = "Household Finance sync state";
 const GH_API = "https://api.github.com";
 const OWNERS = ["Garrett", "Lizzie", "Joint"];
+const CLASSES = ["Need", "Want", "Savings"];
 const STARTER_CATEGORIES = [
-  "Housing", "Utilities", "Groceries", "Dining Out", "Transportation",
-  "Insurance", "Medical", "Pets", "Subscriptions", "Personal - Garrett",
-  "Personal - Lizzie", "Gifts", "Travel", "Household", "Debt Payments",
-  "Savings", "Misc",
+  ["Housing", "Need"], ["Utilities", "Need"], ["Groceries", "Need"],
+  ["Dining Out", "Want"], ["Transportation", "Need"], ["Insurance", "Need"],
+  ["Medical", "Need"], ["Pets", "Need"], ["Subscriptions", "Want"],
+  ["Personal - Garrett", "Want"], ["Personal - Lizzie", "Want"], ["Gifts", "Want"],
+  ["Travel", "Want"], ["Household", "Need"], ["Debt Payments", "Need"],
+  ["Savings", "Savings"], ["Misc", "Want"],
 ];
+const DEFAULT_CLASS_BY_NAME = Object.fromEntries(STARTER_CATEGORIES);
 
 function freshState() {
   let n = 0;
   return {
     household: "Garrett & Lizzie",
-    categories: STARTER_CATEGORIES.map((name) => ({ id: `seed-${++n}`, name, limit: 0 })),
+    taxRate: 0,
+    categories: STARTER_CATEGORIES.map(([name, cls]) => ({ id: `seed-${++n}`, name, limit: 0, class: cls })),
     spending: [], income: [], oneTimeIncome: [], bills: [], debts: [], goals: [],
     updatedAt: 0,
   };
@@ -35,7 +40,9 @@ for (const k of ["categories", "spending", "income", "oneTimeIncome", "bills", "
   if (!Array.isArray(state[k])) state[k] = [];
 }
 if (typeof state.updatedAt !== "number") state.updatedAt = 0;
+if (typeof state.taxRate !== "number") state.taxRate = 0;
 if (!state.categories.length) state.categories = freshState().categories;
+state.categories.forEach((c) => { if (!CLASSES.includes(c.class)) c.class = DEFAULT_CLASS_BY_NAME[c.name] || "Need"; });
 
 let syncCfg;
 try { syncCfg = JSON.parse(localStorage.getItem(SYNC_KEY)) || {}; } catch { syncCfg = {}; }
@@ -97,6 +104,7 @@ async function ghPush(content) {
 function buildPayload() {
   return JSON.stringify({
     version: 2, updatedAt: state.updatedAt ?? Date.now(), household: state.household,
+    taxRate: state.taxRate ?? 0,
     categories: state.categories, spending: state.spending, income: state.income,
     oneTimeIncome: state.oneTimeIncome, bills: state.bills, debts: state.debts, goals: state.goals,
   });
@@ -106,6 +114,7 @@ function adoptRemote(remote) {
   const arr = (v) => (Array.isArray(v) ? v : []);
   state = {
     household: String(remote.household ?? "Garrett & Lizzie"),
+    taxRate: typeof remote.taxRate === "number" ? remote.taxRate : 0,
     categories: arr(remote.categories), spending: arr(remote.spending),
     income: arr(remote.income), oneTimeIncome: arr(remote.oneTimeIncome),
     bills: arr(remote.bills), debts: arr(remote.debts), goals: arr(remote.goals),
@@ -113,6 +122,7 @@ function adoptRemote(remote) {
   };
   state.income.forEach((r) => { if (!r.frequency) r.frequency = "Monthly"; });
   if (!state.categories.length) state.categories = freshState().categories;
+  state.categories.forEach((c) => { if (!CLASSES.includes(c.class)) c.class = DEFAULT_CLASS_BY_NAME[c.name] || "Need"; });
   persist();
 }
 
@@ -128,14 +138,15 @@ function setBadge() {
   b.className = "sync-badge" + (badgeState === "error" ? " err" : "");
 }
 
-// Append merge: pull latest, adopt it if newer, make sure our new expense is in
-// it, then push. So the phone never overwrites desktop edits it hadn't seen.
-async function syncAppend(newExpense) {
+// Append merge: pull latest, adopt it if newer, make sure our new expense rows
+// are in it, then push. So the phone never overwrites desktop edits it hadn't seen.
+async function syncAppend(newRows) {
+  const rows = Array.isArray(newRows) ? newRows : [newRows];
   badgeState = "syncing"; setBadge();
   const remote = await ghPull();
   if (remote && (remote.updatedAt ?? 0) > (state.updatedAt ?? 0)) {
     adoptRemote(remote);
-    if (!state.spending.some((s) => s.id === newExpense.id)) state.spending.push(newExpense);
+    for (const nr of rows) if (!state.spending.some((s) => s.id === nr.id)) state.spending.push(nr);
   }
   state.updatedAt = Date.now();
   persist();
@@ -144,6 +155,22 @@ async function syncAppend(newExpense) {
   syncCfg.lastSyncedAt = new Date().toISOString();
   saveSyncCfg();
   badgeState = "ok"; setBadge();
+}
+
+// Gross-up: spread tax across the taxable lines (or all lines if none marked)
+// and fold each line's share in. Same rule as the full app.
+function computeSplit(d) {
+  const lines = d.lines.map((l) => ({ ...l, amt: +l.amount || 0 }));
+  const marked = lines.filter((l) => l.taxable);
+  const baseLines = marked.length ? marked : lines;
+  const baseSum = baseLines.reduce((s, l) => s + l.amt, 0);
+  const taxTotal = d.taxMode === "amount" ? (+d.taxValue || 0) : baseSum * ((+d.taxValue || 0) / 100);
+  const out = lines.map((l) => {
+    const tax = baseLines.includes(l) && baseSum > 0 ? taxTotal * (l.amt / baseSum) : 0;
+    return { ...l, tax, total: l.amt + tax };
+  });
+  const subtotal = lines.reduce((s, l) => s + l.amt, 0);
+  return { lines: out, subtotal, taxTotal, grandTotal: subtotal + taxTotal };
 }
 
 // ---------- UI ----------
@@ -229,6 +256,28 @@ renderRecent();
 renderSyncArea();
 setBadge();
 
+// Optimistic save + sync for one or more rows, shared by single and split.
+async function commitRows(rows) {
+  rows.forEach((r) => state.spending.push(r));
+  persist();
+  renderRecent();
+  const many = rows.length > 1;
+  if (isConnected()) {
+    try {
+      await syncAppend(rows);
+      renderRecent();
+      toast(many ? `Saved & synced ${rows.length} lines ✓` : "Saved & synced ✓");
+    } catch (e) {
+      state.updatedAt = Date.now(); persist(); // mark dirty for a later sync
+      badgeState = "error"; setBadge();
+      toast("Saved on phone — will sync later", "warn");
+    }
+  } else {
+    state.updatedAt = Date.now(); persist();
+    toast(many ? `Saved ${rows.length} lines on this phone` : "Saved on this phone");
+  }
+}
+
 $("expForm").addEventListener("submit", async (ev) => {
   ev.preventDefault();
   const amount = +$("amount").value;
@@ -237,33 +286,139 @@ $("expForm").addEventListener("submit", async (ev) => {
   const rec = {
     id: uid(),
     date: $("date").value || new Date().toISOString().slice(0, 10),
-    desc,
-    category: $("category").value,
-    account: $("account").value,
-    amount,
+    desc, category: $("category").value, account: $("account").value, amount,
   };
-  state.spending.push(rec); // optimistic
-  persist();
-  renderRecent();
   $("amount").value = "";
   $("desc").value = "";
   $("amount").focus();
-
-  if (isConnected()) {
-    try {
-      await syncAppend(rec);
-      renderRecent();
-      toast("Saved & synced ✓");
-    } catch (e) {
-      state.updatedAt = Date.now(); persist(); // mark dirty for a later sync
-      badgeState = "error"; setBadge();
-      toast("Saved on phone — will sync later", "warn");
-    }
-  } else {
-    state.updatedAt = Date.now(); persist();
-    toast("Saved on this phone");
-  }
+  await commitRows([rec]);
 });
+
+// ---------- Split receipt (phone) ----------
+
+let splitDraft = freshSplit();
+function freshSplitLine() {
+  const cat = state.categories.find((c) => c.name === "Groceries")?.name || state.categories[0]?.name || "";
+  return { id: uid(), desc: "", category: cat, amount: "", taxable: false };
+}
+function freshSplit() {
+  return {
+    date: new Date().toISOString().slice(0, 10),
+    account: "Joint", taxMode: "rate", taxValue: state.taxRate || 0,
+    lines: [freshSplitLine(), freshSplitLine()],
+  };
+}
+
+function splitLinesHtml(d) {
+  const cats = state.categories.map((c) => c.name);
+  return d.lines.map((l) => `<div class="q-splitline" data-line="${l.id}">
+    <input class="sp-desc" placeholder="(optional) e.g. Paper towels" value="${esc(l.desc)}">
+    <div class="q-splitrow">
+      <select class="sp-cat">${cats.map((n) => `<option ${n === l.category ? "selected" : ""}>${esc(n)}</option>`).join("")}</select>
+      <input class="sp-amt" type="number" inputmode="decimal" step="0.01" min="0" placeholder="0.00" value="${l.amount}">
+      <label class="sp-taxwrap"><input type="checkbox" class="sp-tax" ${l.taxable ? "checked" : ""}> tax</label>
+      <button type="button" class="sp-del" title="Remove">✕</button>
+    </div>
+    <div class="sp-withtax muted"></div>
+  </div>`).join("");
+}
+
+function renderSplit() {
+  const d = splitDraft;
+  $("splitSection").innerHTML = `<div class="q-form">
+    <div class="q-row">
+      <div class="q-field"><label>Date</label><input id="spDate" type="date" value="${d.date}"></div>
+      <div class="q-field"><label>Account</label><select id="spAccount">${OWNERS.map((o) => `<option ${o === d.account ? "selected" : ""}>${o}</option>`).join("")}</select></div>
+    </div>
+    <div id="spLines">${splitLinesHtml(d)}</div>
+    <button type="button" class="q-btn ghost" id="spAdd">＋ Add line</button>
+    <div class="q-field"><label>Tax</label>
+      <div style="display:flex;gap:8px">
+        <select id="spTaxMode" style="flex:0 0 auto">
+          <option value="rate" ${d.taxMode === "rate" ? "selected" : ""}>Rate %</option>
+          <option value="amount" ${d.taxMode === "amount" ? "selected" : ""}>Amount $</option>
+        </select>
+        <input id="spTaxValue" type="number" step="0.01" min="0" inputmode="decimal" value="${d.taxValue}">
+      </div>
+    </div>
+    <div class="rc-summary" id="spSummary"></div>
+    <button type="button" class="q-add" id="spSave">Save receipt</button>
+  </div>`;
+  bindSplit();
+  updateSplitPreview();
+}
+
+function readSplitFromDom() {
+  const s = $("splitSection");
+  splitDraft.date = s.querySelector("#spDate").value;
+  splitDraft.account = s.querySelector("#spAccount").value;
+  splitDraft.taxMode = s.querySelector("#spTaxMode").value;
+  splitDraft.taxValue = s.querySelector("#spTaxValue").value;
+  splitDraft.lines = [...s.querySelectorAll("#spLines .q-splitline")].map((el) => ({
+    id: el.dataset.line,
+    desc: el.querySelector(".sp-desc").value,
+    category: el.querySelector(".sp-cat").value,
+    amount: el.querySelector(".sp-amt").value,
+    taxable: el.querySelector(".sp-tax").checked,
+  }));
+}
+
+function updateSplitPreview() {
+  const s = $("splitSection");
+  const comp = computeSplit(splitDraft);
+  comp.lines.forEach((l) => {
+    const cell = s.querySelector(`.q-splitline[data-line="${l.id}"] .sp-withtax`);
+    if (cell) cell.textContent = l.amt > 0 ? `with tax ${fmtMoney(l.total)}` : "";
+  });
+  s.querySelector("#spSummary").innerHTML =
+    `Subtotal ${fmtMoney(comp.subtotal)} · Tax ${fmtMoney(comp.taxTotal)} · <strong>Total ${fmtMoney(comp.grandTotal)}</strong>`;
+}
+
+function bindSplit() {
+  const s = $("splitSection");
+  s.querySelector("#spLines").addEventListener("input", () => { readSplitFromDom(); updateSplitPreview(); });
+  s.querySelector("#spLines").addEventListener("change", () => { readSplitFromDom(); updateSplitPreview(); });
+  s.querySelector("#spTaxMode").addEventListener("change", () => { readSplitFromDom(); updateSplitPreview(); });
+  s.querySelector("#spTaxValue").addEventListener("input", () => { readSplitFromDom(); updateSplitPreview(); });
+  s.querySelector("#spAdd").addEventListener("click", () => {
+    readSplitFromDom();
+    splitDraft.lines.push(freshSplitLine());
+    renderSplit();
+  });
+  s.querySelector("#spLines").addEventListener("click", (ev) => {
+    const btn = ev.target.closest(".sp-del");
+    if (!btn) return;
+    readSplitFromDom();
+    const id = btn.closest(".q-splitline").dataset.line;
+    splitDraft.lines = splitDraft.lines.filter((l) => l.id !== id);
+    if (!splitDraft.lines.length) splitDraft.lines = [freshSplitLine()];
+    renderSplit();
+  });
+  s.querySelector("#spSave").addEventListener("click", async () => {
+    readSplitFromDom();
+    const comp = computeSplit(splitDraft);
+    const valid = comp.lines.filter((l) => l.amt > 0);
+    if (!valid.length) return alert("Add at least one line with an amount.");
+    const date = splitDraft.date || new Date().toISOString().slice(0, 10);
+    const rows = valid.map((l) => ({
+      id: uid(), date, desc: l.desc.trim() || l.category,
+      category: l.category, account: splitDraft.account,
+      amount: Math.round(l.total * 100) / 100,
+    }));
+    splitDraft = freshSplit();
+    renderSplit();
+    await commitRows(rows);
+  });
+}
+
+// Mode toggle
+document.querySelectorAll(".q-mode").forEach((b) => b.addEventListener("click", () => {
+  const mode = b.dataset.mode;
+  document.querySelectorAll(".q-mode").forEach((x) => x.classList.toggle("active", x === b));
+  $("singleSection").hidden = mode !== "single";
+  $("splitSection").hidden = mode !== "split";
+}));
+renderSplit();
 
 // If already connected, refresh from the cloud on open so categories and the
 // recent list reflect what was set up elsewhere.

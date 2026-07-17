@@ -329,6 +329,14 @@ input[type="date"], input[type="month"] { width: 150px; }
 }
 
 .empty-note { color: var(--text-muted); font-size: 13.5px; padding: 8px 0; }
+
+/* Receipt splitter */
+.rc-table select, .rc-table input[type="text"], .rc-table .rc-desc { width: 100%; min-width: 90px; }
+.rc-table .rc-amt { width: 90px; }
+.rc-table td { vertical-align: middle; }
+.rc-table .rc-del { color: var(--text-muted); font-size: 15px; }
+.rc-table .rc-del:hover { color: var(--status-critical); }
+.rc-summary { margin: 12px 0; font-size: 14px; color: var(--text-secondary); }
 textarea.io-area {
   width: 100%;
   min-height: 140px;

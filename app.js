@@ -18,23 +18,31 @@ const PAY_FREQUENCIES = {
   "Annually": 1 / 12,
 };
 
-// A generic starter category list — structure only, no example dollar figures.
-// Limits all start at 0; set them on the Budget tab.
-const STARTER_CATEGORIES = [
-  "Housing", "Utilities", "Groceries", "Dining Out", "Transportation",
-  "Insurance", "Medical", "Pets", "Subscriptions", "Personal - Garrett",
-  "Personal - Lizzie", "Gifts", "Travel", "Household", "Debt Payments",
-  "Savings", "Misc",
-];
+// The 50/30/20 (Warren) axis — independent of category.
+const CLASSES = ["Need", "Want", "Savings"];
+const CLASS_TARGET = { Need: 0.5, Want: 0.3, Savings: 0.2 };
 
-// Empty starting state — no example data. Category names are kept as a
+// A generic starter category list with a sensible default 50/30/20 class each
+// (all editable/overridable later). Structure only — no example dollar figures.
+const STARTER_CATEGORIES = [
+  ["Housing", "Need"], ["Utilities", "Need"], ["Groceries", "Need"],
+  ["Dining Out", "Want"], ["Transportation", "Need"], ["Insurance", "Need"],
+  ["Medical", "Need"], ["Pets", "Need"], ["Subscriptions", "Want"],
+  ["Personal - Garrett", "Want"], ["Personal - Lizzie", "Want"], ["Gifts", "Want"],
+  ["Travel", "Want"], ["Household", "Need"], ["Debt Payments", "Need"],
+  ["Savings", "Savings"], ["Misc", "Want"],
+];
+const DEFAULT_CLASS_BY_NAME = Object.fromEntries(STARTER_CATEGORIES);
+
+// Empty starting state — no example data. Category names/classes are kept as a
 // convenience (all limits 0); every other section starts empty.
 function seedData() {
   let n = 0;
   return {
     household: "Garrett & Lizzie",
-    categories: STARTER_CATEGORIES.map((name) => ({ id: `seed-${++n}`, name, limit: 0 })),
-    spending: [],
+    taxRate: 0,          // default sales-tax rate (%) for taxable items; set on the Data tab
+    categories: STARTER_CATEGORIES.map(([name, cls]) => ({ id: `seed-${++n}`, name, limit: 0, class: cls })),
+    spending: [],        // { id, date, desc, category, account, amount, class? } — amount is tax-inclusive; class overrides the category default
     income: [],          // recurring paychecks: { id, source, owner, frequency, amount, notes } — amount is per paycheck
     oneTimeIncome: [],   // one-off income: { id, source, owner, date, amount, notes }
     bills: [],
@@ -57,6 +65,8 @@ for (const k of ["categories", "spending", "income", "oneTimeIncome", "bills", "
   if (!Array.isArray(state[k])) state[k] = [];
 }
 state.income.forEach((r) => { if (!r.frequency) r.frequency = "Monthly"; });
+state.categories.forEach((c) => { if (!CLASSES.includes(c.class)) c.class = DEFAULT_CLASS_BY_NAME[c.name] || "Need"; });
+if (typeof state.taxRate !== "number") state.taxRate = 0;
 if (typeof state.updatedAt !== "number") state.updatedAt = 0;
 
 // Write to localStorage WITHOUT touching the change clock — used when adopting a
@@ -141,6 +151,7 @@ function buildSyncPayload() {
     version: 2,
     updatedAt: state.updatedAt ?? Date.now(),
     household: state.household,
+    taxRate: state.taxRate ?? 0,
     categories: state.categories, spending: state.spending,
     income: state.income, oneTimeIncome: state.oneTimeIncome,
     bills: state.bills, debts: state.debts, goals: state.goals,
@@ -152,12 +163,14 @@ function adoptRemote(remote) {
   const arr = (v) => (Array.isArray(v) ? v : []);
   state = {
     household: String(remote.household ?? "Our Household"),
+    taxRate: typeof remote.taxRate === "number" ? remote.taxRate : 0,
     categories: arr(remote.categories), spending: arr(remote.spending),
     income: arr(remote.income), oneTimeIncome: arr(remote.oneTimeIncome),
     bills: arr(remote.bills), debts: arr(remote.debts), goals: arr(remote.goals),
     updatedAt: typeof remote.updatedAt === "number" ? remote.updatedAt : Date.now(),
   };
   state.income.forEach((r) => { if (!r.frequency) r.frequency = "Monthly"; });
+  state.categories.forEach((c) => { if (!CLASSES.includes(c.class)) c.class = DEFAULT_CLASS_BY_NAME[c.name] || "Need"; });
   persist();
   syncCfg.lastSyncedStamp = state.updatedAt;
   saveSyncCfg();
@@ -284,6 +297,19 @@ const totalMinPayments = () => state.debts.reduce((s, d) => s + d.minPayment, 0)
 const totalGoalContributions = () => state.goals.reduce((s, g) => s + g.monthly, 0);
 const totalBudgeted = () => state.categories.reduce((s, c) => s + c.limit, 0);
 
+// 50/30/20 axis. A category has a default class; a spending row may override it.
+const categoryClass = (name) => state.categories.find((c) => c.name === name)?.class || "Need";
+const effectiveClass = (row) => (CLASSES.includes(row.class) ? row.class : categoryClass(row.category));
+
+// This month's spending in a given 50/30/20 class. For Savings we also fold in
+// the monthly savings-goal contributions (per the household's chosen rule).
+function classSpentIn(month, cls) {
+  const spent = state.spending
+    .filter((r) => r.date.slice(0, 7) === month && effectiveClass(r) === cls)
+    .reduce((s, r) => s + r.amount, 0);
+  return cls === "Savings" ? spent + totalGoalContributions() : spent;
+}
+
 function spentIn(month, category) {
   return state.spending
     .filter((r) => r.date.slice(0, 7) === month && (!category || r.category === category))
@@ -346,6 +372,36 @@ function meterRow(name, actual, limit) {
     <div class="meter" role="img" aria-label="${esc(name)}: ${fmtMoney(actual, true)} of ${fmtMoney(limit)}">
       <div class="meter-fill ${cls}" style="width:${Math.min(pct * 100, 100)}%"></div>
     </div>
+  </div>`;
+}
+
+// 50/30/20 (Warren) breakdown for a month: each class's spend vs its target
+// share of take-home income. Savings folds in monthly goal contributions.
+function fiftyThirtyTwentyCard(month) {
+  const income = totalIncome();
+  const body = income <= 0
+    ? `<p class="empty-note">Add your take-home income on the Income tab to see your 50/30/20 targets.</p>`
+    : CLASSES.map((cls) => {
+        const actual = classSpentIn(month, cls);
+        const target = income * CLASS_TARGET[cls];
+        const pctOfIncome = Math.round((actual / income) * 100);
+        const fill = target > 0 ? Math.min((actual / target) * 100, 100) : 0;
+        // For Need/Want, over target reads as a caution; for Savings, more is good.
+        const sev = cls === "Savings" ? "" : actual > target ? "over" : actual >= target * 0.85 ? "warn" : "";
+        return `<div class="meter-row">
+          <div class="meter-head">
+            <span class="meter-name">${cls} <span class="muted">· ${Math.round(CLASS_TARGET[cls] * 100)}% target</span></span>
+            <span class="meter-nums">${fmtMoney(actual)} <span class="muted">of ${fmtMoney(target)}</span> · ${pctOfIncome}% of income</span>
+          </div>
+          <div class="meter" role="img" aria-label="${cls}: ${fmtMoney(actual)} of ${fmtMoney(target)} target">
+            <div class="meter-fill ${sev}" style="width:${fill}%"></div>
+          </div>
+        </div>`;
+      }).join("");
+  return `<div class="card">
+    <h2>50/30/20 — ${fmtMonth(month)}</h2>
+    <p class="card-note">Your spending split into needs, wants, and savings against the 50/30/20 targets on take-home income. Savings includes your monthly goal contributions. Each expense uses its category's class unless you override it.</p>
+    ${body}
   </div>`;
 }
 
@@ -412,6 +468,10 @@ function categoryOptions(selected) {
   return state.categories.map((c) => `<option ${c.name === selected ? "selected" : ""}>${esc(c.name)}</option>`).join("");
 }
 const ownerOptions = (selected) => OWNERS.map((o) => `<option ${o === selected ? "selected" : ""}>${o}</option>`).join("");
+const classOptions = (selected) => CLASSES.map((c) => `<option ${c === selected ? "selected" : ""}>${c}</option>`).join("");
+// For a per-expense override select: blank means "use the category's class".
+const classOverrideOptions = (selected) =>
+  `<option value="">— use category —</option>` + CLASSES.map((c) => `<option ${c === selected ? "selected" : ""}>${c}</option>`).join("");
 
 function renderDashboard(el) {
   const income = totalIncome(), budgeted = totalBudgeted(), cushion = income - budgeted;
@@ -441,6 +501,7 @@ function renderDashboard(el) {
       ${statTile("Goal contributions", fmtMoney(totalGoalContributions()), "toward savings goals")}
       ${statTile("Total budgeted", fmtMoney(budgeted), "sum of category limits")}
     </div>
+    ${fiftyThirtyTwentyCard(month)}
     <div class="card">
       <h2>${fmtMonth(month)} — spending vs total budget</h2>
       <p class="card-note">Logged so far this month against the sum of all category limits.</p>
@@ -506,15 +567,17 @@ function renderBudget(el) {
       <h2>Budget table</h2>
       <form id="categoryForm" class="form-grid">
         <div class="field"><label>Category</label><input name="name" required value="${esc(e?.name ?? "")}" placeholder="e.g. Groceries"></div>
+        <div class="field"><label>Class (50/30/20)</label><select name="class">${classOptions(e?.class ?? "Need")}</select></div>
         <div class="field"><label>Monthly limit</label><input name="limit" type="number" step="1" min="0" required value="${e?.limit ?? ""}"></div>
         <button class="primary-btn">${e ? "Update" : "Add category"}</button>
         ${e ? `<button type="button" class="secondary-btn" id="cancelCategory">Cancel</button>` : ""}
       </form>
       <div class="table-wrap"><table>
-        <thead><tr><th>Category</th><th class="num">Monthly limit</th><th class="num">${fmtMonth(month, true)} actual</th><th class="num">YTD actual</th><th class="num">YTD vs limit</th><th></th></tr></thead>
+        <thead><tr><th>Category</th><th>Class</th><th class="num">Monthly limit</th><th class="num">${fmtMonth(month, true)} actual</th><th class="num">YTD actual</th><th class="num">YTD vs limit</th><th></th></tr></thead>
         <tbody>
           ${rows.map((r) => `<tr>
             <td>${esc(r.name)}</td>
+            <td class="secondary">${esc(r.class)}</td>
             <td class="num">${fmtMoney(r.limit)}</td>
             <td class="num">${fmtMoney(r.actual, true)}</td>
             <td class="num">${fmtMoney(r.ytd, true)}</td>
@@ -524,7 +587,7 @@ function renderBudget(el) {
               <button data-del="${r.id}">Delete</button>
             </td>
           </tr>`).join("")}
-          <tr class="total-row"><td>TOTAL</td><td class="num">${fmtMoney(totalBudgeted())}</td><td class="num">${fmtMoney(totActual, true)}</td><td class="num">${fmtMoney(totYtd, true)}</td><td></td><td></td></tr>
+          <tr class="total-row"><td>TOTAL</td><td></td><td class="num">${fmtMoney(totalBudgeted())}</td><td class="num">${fmtMoney(totActual, true)}</td><td class="num">${fmtMoney(totYtd, true)}</td><td></td><td></td></tr>
         </tbody>
       </table></div>
     </div>`;
@@ -535,16 +598,16 @@ function renderBudget(el) {
   el.querySelector("#categoryForm").addEventListener("submit", (ev) => {
     ev.preventDefault();
     const f = new FormData(ev.target);
-    const name = f.get("name").trim(), limit = +f.get("limit");
+    const name = f.get("name").trim(), limit = +f.get("limit"), cls = f.get("class");
     if (!name) return;
     if (e) {
       // renaming a category keeps its spending history attached
       state.spending.forEach((r) => { if (r.category === e.name) r.category = name; });
       state.bills.forEach((b) => { if (b.category === e.name) b.category = name; });
-      e.name = name; e.limit = limit;
+      e.name = name; e.limit = limit; e.class = cls;
       editing.category = null;
     } else {
-      state.categories.push({ id: uid(), name, limit });
+      state.categories.push({ id: uid(), name, limit, class: cls });
     }
     save(); renderAll();
   });
@@ -571,17 +634,19 @@ function renderSpending(el) {
   el.innerHTML = `
     <div class="card">
       <h2>${e ? "Edit expense" : "Log an expense"}</h2>
-      <p class="card-note">Every expense you log flows into the Budget tab's actuals for its month.</p>
+      <p class="card-note">Every expense you log flows into the Budget tab's actuals for its month. Class defaults to the category's, or override it here.</p>
       <form id="spendForm" class="form-grid">
         <div class="field"><label>Date</label><input name="date" type="date" required value="${e?.date ?? today}"></div>
         <div class="field"><label>Description</label><input name="desc" required value="${esc(e?.desc ?? "")}" placeholder="e.g. HyVee groceries"></div>
         <div class="field"><label>Category</label><select name="category">${categoryOptions(e?.category)}</select></div>
         <div class="field"><label>Account</label><select name="account">${ownerOptions(e?.account ?? "Joint")}</select></div>
+        <div class="field"><label>Class</label><select name="class">${classOverrideOptions(e?.class)}</select></div>
         <div class="field"><label>Amount</label><input name="amount" type="number" step="0.01" min="0.01" required value="${e?.amount ?? ""}"></div>
         <button class="primary-btn">${e ? "Update" : "Add expense"}</button>
         ${e ? `<button type="button" class="secondary-btn" id="cancelSpend">Cancel</button>` : ""}
       </form>
     </div>
+    ${e ? "" : receiptCard()}
     <div class="card">
       <div class="toolbar">
         <div class="field"><label>Month</label><input type="month" id="spendMonth" value="${month}"></div>
@@ -589,16 +654,17 @@ function renderSpending(el) {
         <span class="secondary" style="font-size:14px">${rows.length} expense${rows.length === 1 ? "" : "s"} · <strong>${fmtMoney(total, true)}</strong></span>
       </div>
       <div class="table-wrap"><table>
-        <thead><tr><th>Date</th><th>Description</th><th>Category</th><th>Account</th><th class="num">Amount</th><th></th></tr></thead>
+        <thead><tr><th>Date</th><th>Description</th><th>Category</th><th>Class</th><th>Account</th><th class="num">Amount</th><th></th></tr></thead>
         <tbody>
           ${rows.map((r) => `<tr>
             <td class="secondary" style="white-space:nowrap">${r.date}</td>
             <td>${esc(r.desc)}</td>
             <td class="secondary">${esc(r.category)}</td>
+            <td class="secondary">${esc(effectiveClass(r))}${r.class ? " ·" : ""}</td>
             <td class="secondary">${esc(r.account)}</td>
             <td class="num">${fmtMoney(r.amount, true)}</td>
             <td class="row-actions"><button data-edit="${r.id}">Edit</button><button data-del="${r.id}">Delete</button></td>
-          </tr>`).join("") || `<tr><td colspan="6" class="empty-note">Nothing logged for ${fmtMonth(month)} yet.</td></tr>`}
+          </tr>`).join("") || `<tr><td colspan="7" class="empty-note">Nothing logged for ${fmtMonth(month)} yet.</td></tr>`}
         </tbody>
       </table></div>
     </div>`;
@@ -616,8 +682,10 @@ function renderSpending(el) {
       account: f.get("account"),
       amount: +f.get("amount"),
     };
-    if (e) { Object.assign(e, rec); editing.spending = null; }
-    else state.spending.push({ id: uid(), ...rec });
+    const cls = f.get("class");
+    if (CLASSES.includes(cls)) rec.class = cls; else rec.class = undefined;
+    if (e) { Object.assign(e, rec); if (!rec.class) delete e.class; editing.spending = null; }
+    else { if (!rec.class) delete rec.class; state.spending.push({ id: uid(), ...rec }); }
     selectedMonth = rec.date.slice(0, 7);
     save(); renderAll();
   });
@@ -627,6 +695,161 @@ function renderSpending(el) {
     state.spending = state.spending.filter((r) => r.id !== b.dataset.del);
     save(); renderAll();
   }));
+
+  if (!e) bindReceipt(el.querySelector("#rcCard"));
+}
+
+// ---------- Multi-line receipt (tax folded into each line — method D) ----------
+
+let receiptDraft = null;
+function freshReceiptLine() {
+  return { id: uid(), desc: "", category: state.categories[0]?.name || "", cls: "", amount: "", taxable: false };
+}
+function freshReceipt() {
+  return {
+    date: new Date().toISOString().slice(0, 10),
+    account: "Joint",
+    taxMode: "rate",
+    taxValue: state.taxRate || 0,
+    lines: [freshReceiptLine(), freshReceiptLine()],
+  };
+}
+
+// Spread the tax across the taxable lines (or, if none are marked, across all
+// lines) and fold each line's share into its cost.
+function computeReceipt(d) {
+  const lines = d.lines.map((l) => ({ ...l, amt: +l.amount || 0 }));
+  const subtotal = lines.reduce((s, l) => s + l.amt, 0);
+  const marked = lines.filter((l) => l.taxable);
+  const baseLines = marked.length ? marked : lines;
+  const baseSum = baseLines.reduce((s, l) => s + l.amt, 0);
+  const rate = (+d.taxValue || 0) / 100;
+  const taxTotal = d.taxMode === "amount" ? (+d.taxValue || 0) : baseSum * rate;
+  const out = lines.map((l) => {
+    const inBase = baseLines.includes(l);
+    const tax = inBase && baseSum > 0 ? taxTotal * (l.amt / baseSum) : 0;
+    return { ...l, tax, total: l.amt + tax };
+  });
+  return { lines: out, subtotal, taxTotal, grandTotal: subtotal + taxTotal };
+}
+
+function receiptLinesHtml(d) {
+  return d.lines.map((l) => `<tr data-line="${l.id}">
+    <td><input class="rc-desc" value="${esc(l.desc)}" placeholder="e.g. Paper towels"></td>
+    <td><select class="rc-cat">${categoryOptions(l.category)}</select></td>
+    <td><select class="rc-class">${classOverrideOptions(l.cls)}</select></td>
+    <td class="num"><input class="rc-amt" type="number" step="0.01" min="0" inputmode="decimal" value="${l.amount}"></td>
+    <td style="text-align:center"><input class="rc-tax" type="checkbox" ${l.taxable ? "checked" : ""}></td>
+    <td class="num rc-withtax">—</td>
+    <td class="row-actions"><button type="button" class="rc-del" title="Remove line">✕</button></td>
+  </tr>`).join("");
+}
+
+function receiptCard() {
+  if (!receiptDraft) receiptDraft = freshReceipt();
+  const d = receiptDraft;
+  return `<div class="card" id="rcCard">
+    <h2>Split a receipt across categories</h2>
+    <p class="card-note">One purchase, many categories. Tick the taxable lines and enter the tax — a dollar amount from the receipt, or a rate — and it's spread across those lines and folded into each line's cost. No separate tax expense is stored.</p>
+    <div class="form-grid">
+      <div class="field"><label>Date</label><input id="rcDate" type="date" value="${d.date}"></div>
+      <div class="field"><label>Account</label><select id="rcAccount">${ownerOptions(d.account)}</select></div>
+    </div>
+    <div class="table-wrap"><table class="rc-table">
+      <thead><tr><th>Description</th><th>Category</th><th>Class</th><th class="num">Amount</th><th>Tax?</th><th class="num">With tax</th><th></th></tr></thead>
+      <tbody id="rcLines">${receiptLinesHtml(d)}</tbody>
+    </table></div>
+    <div class="toolbar">
+      <button type="button" class="secondary-btn" id="rcAddLine">＋ Add line</button>
+      <div class="spacer"></div>
+      <div class="field"><label>Tax</label>
+        <div style="display:flex;gap:6px;align-items:center">
+          <select id="rcTaxMode">
+            <option value="rate" ${d.taxMode === "rate" ? "selected" : ""}>Rate %</option>
+            <option value="amount" ${d.taxMode === "amount" ? "selected" : ""}>Amount $</option>
+          </select>
+          <input id="rcTaxValue" type="number" step="0.01" min="0" inputmode="decimal" style="width:96px" value="${d.taxValue}">
+        </div>
+      </div>
+    </div>
+    <div class="rc-summary" id="rcSummary"></div>
+    <button type="button" class="primary-btn" id="rcSave">Save receipt</button>
+  </div>`;
+}
+
+function readReceiptFromDom() {
+  const card = document.getElementById("rcCard");
+  if (!card) return;
+  receiptDraft.date = card.querySelector("#rcDate").value;
+  receiptDraft.account = card.querySelector("#rcAccount").value;
+  receiptDraft.taxMode = card.querySelector("#rcTaxMode").value;
+  receiptDraft.taxValue = card.querySelector("#rcTaxValue").value;
+  receiptDraft.lines = [...card.querySelectorAll("#rcLines tr")].map((tr) => ({
+    id: tr.dataset.line,
+    desc: tr.querySelector(".rc-desc").value,
+    category: tr.querySelector(".rc-cat").value,
+    cls: tr.querySelector(".rc-class").value,
+    amount: tr.querySelector(".rc-amt").value,
+    taxable: tr.querySelector(".rc-tax").checked,
+  }));
+}
+
+function updateReceiptPreview() {
+  const card = document.getElementById("rcCard");
+  if (!card) return;
+  const comp = computeReceipt(receiptDraft);
+  comp.lines.forEach((l) => {
+    const cell = card.querySelector(`tr[data-line="${l.id}"] .rc-withtax`);
+    if (cell) cell.textContent = l.amt > 0 ? fmtMoney(l.total, true) : "—";
+  });
+  card.querySelector("#rcSummary").innerHTML =
+    `Subtotal ${fmtMoney(comp.subtotal, true)} · Tax ${fmtMoney(comp.taxTotal, true)} · <strong>Total ${fmtMoney(comp.grandTotal, true)}</strong>`;
+}
+
+function rerenderReceiptLines() {
+  const card = document.getElementById("rcCard");
+  if (!card) return;
+  card.querySelector("#rcLines").innerHTML = receiptLinesHtml(receiptDraft);
+  updateReceiptPreview();
+}
+
+function bindReceipt(card) {
+  if (!card) return;
+  updateReceiptPreview();
+  card.addEventListener("input", () => { readReceiptFromDom(); updateReceiptPreview(); });
+  card.addEventListener("change", () => { readReceiptFromDom(); updateReceiptPreview(); });
+  card.querySelector("#rcAddLine").addEventListener("click", () => {
+    readReceiptFromDom();
+    receiptDraft.lines.push(freshReceiptLine());
+    rerenderReceiptLines();
+  });
+  card.querySelector("#rcLines").addEventListener("click", (ev) => {
+    const btn = ev.target.closest(".rc-del");
+    if (!btn) return;
+    readReceiptFromDom();
+    const id = btn.closest("tr").dataset.line;
+    receiptDraft.lines = receiptDraft.lines.filter((l) => l.id !== id);
+    if (!receiptDraft.lines.length) receiptDraft.lines = [freshReceiptLine()];
+    rerenderReceiptLines();
+  });
+  card.querySelector("#rcSave").addEventListener("click", () => {
+    readReceiptFromDom();
+    const comp = computeReceipt(receiptDraft);
+    const valid = comp.lines.filter((l) => l.desc.trim() && l.amt > 0);
+    if (!valid.length) return alert("Add at least one line with a description and amount.");
+    const date = receiptDraft.date || new Date().toISOString().slice(0, 10);
+    valid.forEach((l) => {
+      const row = {
+        id: uid(), date, desc: l.desc.trim(), category: l.category,
+        account: receiptDraft.account, amount: Math.round(l.total * 100) / 100,
+      };
+      if (CLASSES.includes(l.cls)) row.class = l.cls;
+      state.spending.push(row);
+    });
+    selectedMonth = date.slice(0, 7);
+    receiptDraft = freshReceipt();
+    save(); renderAll();
+  });
 }
 
 function renderIncome(el) {
@@ -926,8 +1149,10 @@ function renderData(el) {
       <h2>Household</h2>
       <form id="householdForm" class="form-grid">
         <div class="field"><label>Household name</label><input name="household" value="${esc(state.household)}"></div>
+        <div class="field"><label>Default sales tax rate (%)</label><input name="taxRate" type="number" step="0.001" min="0" value="${state.taxRate}"></div>
         <button class="primary-btn">Save</button>
       </form>
+      <p class="card-note">The tax rate pre-fills the receipt splitter. In Kansas, groceries are state-exempt; in Missouri, groceries are taxed at a reduced 1.225% state rate — so mark taxable per line rather than relying on one blanket rate.</p>
     </div>
     <div class="card">
       <h2>Sync across devices</h2>
@@ -967,7 +1192,9 @@ function renderData(el) {
 
   el.querySelector("#householdForm").addEventListener("submit", (ev) => {
     ev.preventDefault();
-    state.household = new FormData(ev.target).get("household").trim() || "Household";
+    const f = new FormData(ev.target);
+    state.household = f.get("household").trim() || "Household";
+    state.taxRate = Math.max(0, +f.get("taxRate") || 0);
     save(); renderAll();
   });
   el.querySelector("#exportBtn").addEventListener("click", () => {
@@ -988,10 +1215,12 @@ function renderData(el) {
       if (!confirm("Replace ALL current data with this backup?")) return;
       state = {
         household: String(data.household ?? "Household"),
+        taxRate: typeof data.taxRate === "number" ? data.taxRate : 0,
         ...Object.fromEntries(keys.map((k) => [k, data[k]])),
         oneTimeIncome: Array.isArray(data.oneTimeIncome) ? data.oneTimeIncome : [],
       };
       state.income.forEach((r) => { if (!r.frequency) r.frequency = "Monthly"; });
+      state.categories.forEach((c) => { if (!CLASSES.includes(c.class)) c.class = DEFAULT_CLASS_BY_NAME[c.name] || "Need"; });
       save(); renderAll();
     } catch {
       alert("That doesn't look like a valid backup file.");
