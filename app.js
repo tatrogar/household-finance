@@ -8,7 +8,7 @@ const OWNERS = ["Garrett", "Lizzie", "Joint"];
 // Bill frequencies (how often a bill is charged), as charges-per-month.
 // "One-time" is a scheduled expense that happens once — it contributes nothing
 // to the monthly total but shows up in upcoming bills until its date passes.
-const FREQUENCIES = { Weekly: 52 / 12, "Bi-weekly": 26 / 12, Monthly: 1, Quarterly: 1 / 3, "Semi-annual": 1 / 6, Annual: 1 / 12, "One-time": 0 };
+const FREQUENCIES = { Weekly: 52 / 12, "Bi-weekly": 26 / 12, Monthly: 1, Quarterly: 1 / 3, "Semi-annual": 1 / 6, Annual: 1 / 12, "Every 2 years": 1 / 24, "One-time": 0 };
 // Pay frequencies (how often a paycheck lands), as paychecks-per-month.
 // Bi-weekly (every other week) is 26/yr; twice-a-month (semi-monthly) is 24/yr — they differ.
 const PAY_FREQUENCIES = {
@@ -93,6 +93,7 @@ function addPeriod(dateStr, freq) {
   else if (freq === "Monthly") dt.setMonth(dt.getMonth() + 1);
   else if (freq === "Quarterly") dt.setMonth(dt.getMonth() + 3);
   else if (freq === "Semi-annual") dt.setMonth(dt.getMonth() + 6);
+  else if (freq === "Every 2 years") dt.setFullYear(dt.getFullYear() + 2);
   else dt.setFullYear(dt.getFullYear() + 1);
   return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
 }
