@@ -1,9 +1,10 @@
 {
+  "id": "/household-finance/quick/",
   "name": "Quick Expense",
   "short_name": "Expense",
   "description": "One-tap expense entry for the shared household budget.",
   "start_url": "./",
-  "scope": "../",
+  "scope": "./",
   "display": "standalone",
   "background_color": "#0d0d0d",
   "theme_color": "#0ca30c",

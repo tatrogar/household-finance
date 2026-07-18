@@ -1,4 +1,5 @@
 {
+  "id": "/household-finance/",
   "name": "Household Finance",
   "short_name": "Finance",
   "description": "Local-first household budget — income, 50/30/20, bills, debts, goals, synced between devices.",
