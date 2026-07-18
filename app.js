@@ -5,8 +5,10 @@
 
 const STORAGE_KEY = "household-finance-v2";
 const OWNERS = ["Garrett", "Lizzie", "Joint"];
-// Bill frequencies (how often a bill is charged).
-const FREQUENCIES = { Weekly: 52 / 12, "Bi-weekly": 26 / 12, Monthly: 1, Quarterly: 1 / 3, "Semi-annual": 1 / 6, Annual: 1 / 12 };
+// Bill frequencies (how often a bill is charged), as charges-per-month.
+// "One-time" is a scheduled expense that happens once — it contributes nothing
+// to the monthly total but shows up in upcoming bills until its date passes.
+const FREQUENCIES = { Weekly: 52 / 12, "Bi-weekly": 26 / 12, Monthly: 1, Quarterly: 1 / 3, "Semi-annual": 1 / 6, Annual: 1 / 12, "One-time": 0 };
 // Pay frequencies (how often a paycheck lands), as paychecks-per-month.
 // Bi-weekly (every other week) is 26/yr; twice-a-month (semi-monthly) is 24/yr — they differ.
 const PAY_FREQUENCIES = {
@@ -68,6 +70,55 @@ state.income.forEach((r) => { if (!r.frequency) r.frequency = "Monthly"; });
 state.categories.forEach((c) => { if (!CLASSES.includes(c.class)) c.class = DEFAULT_CLASS_BY_NAME[c.name] || "Need"; });
 if (typeof state.taxRate !== "number") state.taxRate = 0;
 if (typeof state.updatedAt !== "number") state.updatedAt = 0;
+
+// ---------- Bill due dates ----------
+
+const todayStr = () => new Date().toISOString().slice(0, 10);
+const fmtDateStr = (s) => {
+  const [y, m, d] = s.split("-").map(Number);
+  return new Date(y, m - 1, d).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+};
+const daysUntil = (s) => {
+  const [y, m, d] = s.split("-").map(Number);
+  const now = new Date();
+  return Math.round((new Date(y, m - 1, d) - new Date(now.getFullYear(), now.getMonth(), now.getDate())) / 86400000);
+};
+
+// Advance a due date by one period of the bill's frequency.
+function addPeriod(dateStr, freq) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  const dt = new Date(y, m - 1, d);
+  if (freq === "Weekly") dt.setDate(dt.getDate() + 7);
+  else if (freq === "Bi-weekly") dt.setDate(dt.getDate() + 14);
+  else if (freq === "Monthly") dt.setMonth(dt.getMonth() + 1);
+  else if (freq === "Quarterly") dt.setMonth(dt.getMonth() + 3);
+  else if (freq === "Semi-annual") dt.setMonth(dt.getMonth() + 6);
+  else dt.setFullYear(dt.getFullYear() + 1);
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+}
+
+// Migrate day-of-month bills to a full next-due date, then roll every
+// recurring bill's date forward past today. One-time bills keep their date
+// (a past date shows as overdue rather than silently advancing).
+function normalizeBills() {
+  let changed = false;
+  state.bills.forEach((b) => {
+    if (!b.dueDate) {
+      const now = new Date();
+      const day = Math.min(Math.max(+b.dueDay || 1, 1), 28);
+      const dt = new Date(now.getFullYear(), now.getMonth(), day);
+      if (day < now.getDate()) dt.setMonth(dt.getMonth() + 1);
+      b.dueDate = `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+      delete b.dueDay;
+      changed = true;
+    }
+    if (b.frequency !== "One-time") {
+      while (b.dueDate < todayStr()) { b.dueDate = addPeriod(b.dueDate, b.frequency); changed = true; }
+    }
+  });
+  return changed;
+}
+if (normalizeBills()) { state.updatedAt = Date.now(); localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); }
 
 // Write to localStorage WITHOUT touching the change clock — used when adopting a
 // cloud copy, where we want to keep the cloud's timestamp rather than stamp a new one.
@@ -171,6 +222,7 @@ function adoptRemote(remote) {
   };
   state.income.forEach((r) => { if (!r.frequency) r.frequency = "Monthly"; });
   state.categories.forEach((c) => { if (!CLASSES.includes(c.class)) c.class = DEFAULT_CLASS_BY_NAME[c.name] || "Need"; });
+  normalizeBills();
   persist();
   syncCfg.lastSyncedStamp = state.updatedAt;
   saveSyncCfg();
@@ -482,9 +534,8 @@ function renderDashboard(el) {
     .filter((c) => c.limit > 0 && c.actual / c.limit >= 0.85)
     .sort((a, b) => b.actual / b.limit - a.actual / a.limit);
 
-  const today = new Date();
   const upcoming = [...state.bills]
-    .map((b) => ({ ...b, daysAway: (b.dueDay - today.getDate() + 31) % 31 }))
+    .map((b) => ({ ...b, daysAway: daysUntil(b.dueDate) }))
     .sort((a, b) => a.daysAway - b.daysAway)
     .slice(0, 5);
 
@@ -518,15 +569,15 @@ function renderDashboard(el) {
     <div class="two-col">
       <div class="card">
         <h2>Upcoming bills</h2>
-        <p class="card-note">Next five by due day.</p>
+        <p class="card-note">Next five by due date — including annual and one-time scheduled expenses.</p>
         <div class="table-wrap"><table>
-          <thead><tr><th>Bill</th><th class="num">Due day</th><th class="num">Amount</th><th>Auto-pay</th></tr></thead>
+          <thead><tr><th>Bill</th><th>Due</th><th class="num">Amount</th><th>Auto-pay</th></tr></thead>
           <tbody>${upcoming.map((b) => `<tr>
             <td>${esc(b.name)}</td>
-            <td class="num">${b.dueDay}</td>
+            <td class="secondary" style="white-space:nowrap">${fmtDateStr(b.dueDate)} <span class="muted">· ${b.daysAway < 0 ? '<span class="neg">overdue</span>' : b.daysAway === 0 ? "today" : `in ${b.daysAway}d`}</span></td>
             <td class="num">${fmtMoney(b.amount, true)}</td>
             <td class="secondary">${b.autopay ? "Yes" : "No"}</td>
-          </tr>`).join("")}</tbody>
+          </tr>`).join("") || `<tr><td colspan="4" class="empty-note">No bills scheduled.</td></tr>`}</tbody>
         </table></div>
       </div>
       <div class="card">
@@ -953,16 +1004,21 @@ function renderIncome(el) {
 
 function renderBills(el) {
   const e = editing.bill ? state.bills.find((b) => b.id === editing.bill) : null;
-  const rows = [...state.bills].sort((a, b) => a.dueDay - b.dueDay);
+  const rows = [...state.bills].sort((a, b) => a.dueDate.localeCompare(b.dueDate));
+  const dueCell = (b) => {
+    const n = daysUntil(b.dueDate);
+    const when = n < 0 ? `<span class="neg">overdue</span>` : n === 0 ? "today" : `in ${n}d`;
+    return `${fmtDateStr(b.dueDate)} <span class="muted">· ${when}</span>`;
+  };
   el.innerHTML = `
     <div class="card">
-      <h2>Recurring bills &amp; subscriptions</h2>
-      <p class="card-note">Enter each bill once at its real frequency — the monthly equivalent is computed (e.g. a $720 semi-annual premium is $120/mo).</p>
+      <h2>Recurring bills &amp; scheduled expenses</h2>
+      <p class="card-note">Enter each bill once at its real frequency with its next due date — an annual bill like car registration recurs on that date each year, and the monthly equivalent is computed (a $720 semi-annual premium is $120/mo). Use "One-time" for an expense that happens once; it shows in upcoming bills but doesn't count toward the monthly total. Recurring dates roll forward automatically after they pass.</p>
       <form id="billForm" class="form-grid">
-        <div class="field"><label>Bill</label><input name="name" required value="${esc(e?.name ?? "")}"></div>
+        <div class="field"><label>Bill</label><input name="name" required value="${esc(e?.name ?? "")}" placeholder="e.g. Car registration"></div>
         <div class="field"><label>Category</label><select name="category">${categoryOptions(e?.category)}</select></div>
         <div class="field"><label>Paid from</label><select name="paidFrom">${ownerOptions(e?.paidFrom ?? "Joint")}</select></div>
-        <div class="field"><label>Due day</label><input name="dueDay" type="number" min="1" max="31" required value="${e?.dueDay ?? ""}" style="width:70px"></div>
+        <div class="field"><label>Next due</label><input name="dueDate" type="date" required value="${e?.dueDate ?? todayStr()}"></div>
         <div class="field"><label>Frequency</label><select name="frequency">${Object.keys(FREQUENCIES).map((fq) => `<option ${fq === (e?.frequency ?? "Monthly") ? "selected" : ""}>${fq}</option>`).join("")}</select></div>
         <div class="field"><label>Amount</label><input name="amount" type="number" step="0.01" min="0" required value="${e?.amount ?? ""}"></div>
         <div class="field checkbox-field"><input name="autopay" id="autopayBox" type="checkbox" ${e?.autopay !== false ? "checked" : ""}><label for="autopayBox">Auto-pay</label></div>
@@ -970,19 +1026,19 @@ function renderBills(el) {
         ${e ? `<button type="button" class="secondary-btn" id="cancelBill">Cancel</button>` : ""}
       </form>
       <div class="table-wrap"><table>
-        <thead><tr><th>Bill</th><th>Category</th><th>Paid from</th><th class="num">Due day</th><th>Frequency</th><th class="num">Amount</th><th class="num">Monthly equiv.</th><th>Auto-pay</th><th></th></tr></thead>
+        <thead><tr><th>Bill</th><th>Category</th><th>Paid from</th><th>Next due</th><th>Frequency</th><th class="num">Amount</th><th class="num">Monthly equiv.</th><th>Auto-pay</th><th></th></tr></thead>
         <tbody>
           ${rows.map((b) => `<tr>
             <td>${esc(b.name)}</td>
             <td class="secondary">${esc(b.category)}</td>
             <td class="secondary">${esc(b.paidFrom)}</td>
-            <td class="num">${b.dueDay}</td>
+            <td class="secondary" style="white-space:nowrap">${dueCell(b)}</td>
             <td class="secondary">${esc(b.frequency)}</td>
             <td class="num">${fmtMoney(b.amount, true)}</td>
-            <td class="num">${fmtMoney(monthlyEquivalent(b), true)}</td>
+            <td class="num">${b.frequency === "One-time" ? '<span class="muted">—</span>' : fmtMoney(monthlyEquivalent(b), true)}</td>
             <td class="secondary">${b.autopay ? "Yes" : "No"}</td>
             <td class="row-actions"><button data-edit="${b.id}">Edit</button><button data-del="${b.id}">Delete</button></td>
-          </tr>`).join("")}
+          </tr>`).join("") || `<tr><td colspan="9" class="empty-note">No bills or scheduled expenses yet.</td></tr>`}
           <tr class="total-row"><td>TOTAL / MONTH</td><td></td><td></td><td></td><td></td><td></td><td class="num">${fmtMoney(totalBills(), true)}</td><td></td><td></td></tr>
         </tbody>
       </table></div>
@@ -995,7 +1051,7 @@ function renderBills(el) {
       name: f.get("name").trim(),
       category: f.get("category"),
       paidFrom: f.get("paidFrom"),
-      dueDay: +f.get("dueDay"),
+      dueDate: f.get("dueDate") || todayStr(),
       frequency: f.get("frequency"),
       amount: +f.get("amount"),
       autopay: f.get("autopay") === "on",
