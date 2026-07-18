@@ -590,6 +590,15 @@ function renderDashboard(el) {
   bindChartHover(el.querySelector("#dashChart"));
 }
 
+// How the Budget tab orders categories — a per-device preference.
+let budgetSort = localStorage.getItem("household-finance-budget-sort") || "class";
+const BUDGET_SORTS = {
+  class: ["By class (need / want / savings)", (a, b) => CLASSES.indexOf(a.class) - CLASSES.indexOf(b.class) || a.name.localeCompare(b.name)],
+  alpha: ["Alphabetical", (a, b) => a.name.localeCompare(b.name)],
+  limit: ["By monthly limit", (a, b) => b.limit - a.limit || a.name.localeCompare(b.name)],
+  actual: ["By this month's spending", (a, b) => b.actual - a.actual || a.name.localeCompare(b.name)],
+};
+
 function renderBudget(el) {
   const month = selectedMonth;
   const year = month.slice(0, 4);
@@ -601,6 +610,7 @@ function renderBudget(el) {
     const ytdAllowance = c.limit * (monthIndex + 1);
     return { ...c, actual, ytd, ytdVs: ytdAllowance - ytd };
   });
+  rows.sort((BUDGET_SORTS[budgetSort] || BUDGET_SORTS.class)[1]);
   const totActual = rows.reduce((s, r) => s + r.actual, 0);
   const totYtd = rows.reduce((s, r) => s + r.ytd, 0);
   const e = editing.category ? state.categories.find((c) => c.id === editing.category) : null;
@@ -609,6 +619,7 @@ function renderBudget(el) {
     <div class="card">
       <div class="toolbar">
         <div class="field"><label>Month</label><input type="month" id="budgetMonth" value="${month}"></div>
+        <div class="field"><label>Sort</label><select id="budgetSort">${Object.entries(BUDGET_SORTS).map(([k, [label]]) => `<option value="${k}" ${k === budgetSort ? "selected" : ""}>${label}</option>`).join("")}</select></div>
         <div class="spacer"></div>
       </div>
       <h2>Category limits vs. actuals — ${fmtMonth(month)}</h2>
@@ -647,6 +658,11 @@ function renderBudget(el) {
 
   el.querySelector("#budgetMonth").addEventListener("change", (ev) => {
     if (ev.target.value) { selectedMonth = ev.target.value; renderAll(); }
+  });
+  el.querySelector("#budgetSort").addEventListener("change", (ev) => {
+    budgetSort = ev.target.value;
+    localStorage.setItem("household-finance-budget-sort", budgetSort);
+    renderAll();
   });
   el.querySelector("#categoryForm").addEventListener("submit", (ev) => {
     ev.preventDefault();
