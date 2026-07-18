@@ -330,6 +330,10 @@ input[type="date"], input[type="month"] { width: 150px; }
 
 .empty-note { color: var(--text-muted); font-size: 13.5px; padding: 8px 0; }
 
+/* Inline budget-table editors */
+.cat-limit { width: 90px; text-align: right; font-variant-numeric: tabular-nums; padding: 5px 8px; }
+.cat-class { padding: 5px 8px; }
+
 /* Receipt splitter */
 .rc-table select, .rc-table input[type="text"], .rc-table .rc-desc { width: 100%; min-width: 90px; }
 .rc-table .rc-amt { width: 90px; }

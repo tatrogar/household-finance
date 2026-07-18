@@ -617,6 +617,7 @@ function renderBudget(el) {
     </div>
     <div class="card">
       <h2>Budget table</h2>
+      <p class="card-note">Type a new limit or pick a class right in the table — changes save as soon as you leave the field. The form below adds a category or renames one.</p>
       <form id="categoryForm" class="form-grid">
         <div class="field"><label>Category</label><input name="name" required value="${esc(e?.name ?? "")}" placeholder="e.g. Groceries"></div>
         <div class="field"><label>Class (50/30/20)</label><select name="class">${classOptions(e?.class ?? "Need")}</select></div>
@@ -629,13 +630,13 @@ function renderBudget(el) {
         <tbody>
           ${rows.map((r) => `<tr>
             <td>${esc(r.name)}</td>
-            <td class="secondary">${esc(r.class)}</td>
-            <td class="num">${fmtMoney(r.limit)}</td>
+            <td><select class="cat-class" data-id="${r.id}">${classOptions(r.class)}</select></td>
+            <td class="num"><input class="cat-limit" data-id="${r.id}" type="number" min="0" step="1" inputmode="numeric" value="${r.limit}"></td>
             <td class="num">${fmtMoney(r.actual, true)}</td>
             <td class="num">${fmtMoney(r.ytd, true)}</td>
             <td class="num ${r.ytdVs >= 0 ? "pos" : "neg"}">${r.ytd > 0 ? fmtMoney(r.ytdVs, true) : '<span class="muted">—</span>'}</td>
             <td class="row-actions">
-              <button data-edit="${r.id}">Edit</button>
+              <button data-edit="${r.id}">Rename</button>
               <button data-del="${r.id}">Delete</button>
             </td>
           </tr>`).join("")}
@@ -664,12 +665,30 @@ function renderBudget(el) {
     save(); renderAll();
   });
   el.querySelector("#cancelCategory")?.addEventListener("click", () => { editing.category = null; renderAll(); });
-  el.querySelectorAll("[data-edit]").forEach((b) => b.addEventListener("click", () => { editing.category = b.dataset.edit; renderAll(); }));
+  el.querySelectorAll("[data-edit]").forEach((b) => b.addEventListener("click", () => {
+    editing.category = b.dataset.edit;
+    renderAll();
+    document.querySelector("#categoryForm")?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }));
   el.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", () => {
     const cat = state.categories.find((c) => c.id === b.dataset.del);
     const used = state.spending.some((r) => r.category === cat.name);
     if (!confirm(used ? `"${cat.name}" has logged expenses. Delete the category anyway? (Expenses keep the name but lose their limit.)` : `Delete "${cat.name}"?`)) return;
     state.categories = state.categories.filter((c) => c.id !== b.dataset.del);
+    save(); renderAll();
+  }));
+
+  // Inline edits in the table: commit on change (blur / Enter / select).
+  el.querySelectorAll(".cat-limit").forEach((inp) => inp.addEventListener("change", () => {
+    const c = state.categories.find((x) => x.id === inp.dataset.id);
+    if (!c) return;
+    c.limit = Math.max(0, +inp.value || 0);
+    save(); renderAll();
+  }));
+  el.querySelectorAll(".cat-class").forEach((sel) => sel.addEventListener("change", () => {
+    const c = state.categories.find((x) => x.id === sel.dataset.id);
+    if (!c) return;
+    c.class = sel.value;
     save(); renderAll();
   }));
 }
