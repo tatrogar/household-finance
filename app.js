@@ -619,7 +619,7 @@ function renderBudget(el) {
     <div class="card">
       <div class="toolbar">
         <div class="field"><label>Month</label><input type="month" id="budgetMonth" value="${month}"></div>
-        <div class="field"><label>Sort</label><select id="budgetSort">${Object.entries(BUDGET_SORTS).map(([k, [label]]) => `<option value="${k}" ${k === budgetSort ? "selected" : ""}>${label}</option>`).join("")}</select></div>
+        <div class="field"><label>Sort</label><select class="budget-sort">${Object.entries(BUDGET_SORTS).map(([k, [label]]) => `<option value="${k}" ${k === budgetSort ? "selected" : ""}>${label}</option>`).join("")}</select></div>
         <div class="spacer"></div>
       </div>
       <h2>Category limits vs. actuals — ${fmtMonth(month)}</h2>
@@ -627,7 +627,11 @@ function renderBudget(el) {
       ${rows.map((r) => meterRow(r.name, r.actual, r.limit)).join("")}
     </div>
     <div class="card">
-      <h2>Budget table</h2>
+      <div class="toolbar">
+        <h2 style="margin:0">Budget table</h2>
+        <div class="spacer"></div>
+        <div class="field"><label>Sort</label><select class="budget-sort">${Object.entries(BUDGET_SORTS).map(([k, [label]]) => `<option value="${k}" ${k === budgetSort ? "selected" : ""}>${label}</option>`).join("")}</select></div>
+      </div>
       <p class="card-note">Type a new limit or pick a class right in the table — changes save as soon as you leave the field. The form below adds a category or renames one.</p>
       <form id="categoryForm" class="form-grid">
         <div class="field"><label>Category</label><input name="name" required value="${esc(e?.name ?? "")}" placeholder="e.g. Groceries"></div>
@@ -659,11 +663,11 @@ function renderBudget(el) {
   el.querySelector("#budgetMonth").addEventListener("change", (ev) => {
     if (ev.target.value) { selectedMonth = ev.target.value; renderAll(); }
   });
-  el.querySelector("#budgetSort").addEventListener("change", (ev) => {
+  el.querySelectorAll(".budget-sort").forEach((sel) => sel.addEventListener("change", (ev) => {
     budgetSort = ev.target.value;
     localStorage.setItem("household-finance-budget-sort", budgetSort);
     renderAll();
-  });
+  }));
   el.querySelector("#categoryForm").addEventListener("submit", (ev) => {
     ev.preventDefault();
     const f = new FormData(ev.target);
