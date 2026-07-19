@@ -4,7 +4,7 @@
    never intercepted or cached. */
 "use strict";
 
-const CACHE = "household-finance-v1";
+const CACHE = "household-finance-v2";
 const PRECACHE = [
   "./",
   "index.html",
@@ -42,7 +42,9 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return; // never touch api.github.com etc.
 
   event.respondWith(
-    fetch(req)
+    // no-cache: revalidate with the server instead of trusting the HTTP cache,
+    // so a deploy can't leave the page with a mixed old-CSS/new-JS version.
+    fetch(req, { cache: "no-cache" })
       .then((res) => {
         if (res.ok) {
           const copy = res.clone();

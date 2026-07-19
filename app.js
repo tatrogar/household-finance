@@ -512,6 +512,7 @@ async function uploadPendingAttachments() {
 let attModalExpenseId = null;
 
 function ensureAttModal() {
+  ensureModalStyles();
   if (document.getElementById("attModal")) return;
   const div = document.createElement("div");
   div.id = "attModal";
@@ -611,11 +612,34 @@ function openPreview(m, data) {
   }
 }
 
+// Modal-critical CSS ships with the JS (not only styles.css) so a cached old
+// stylesheet can never render a dialog as bare floating text.
+function ensureModalStyles() {
+  if (document.getElementById("modalStyles")) return;
+  const s = document.createElement("style");
+  s.id = "modalStyles";
+  s.textContent = `
+    .att-overlay{position:fixed;inset:0;z-index:30;background:rgba(0,0,0,.45);display:flex;align-items:flex-start;justify-content:center;padding:40px 16px;overflow-y:auto}
+    .att-overlay[hidden]{display:none}
+    .att-box{background:var(--surface-1,#fff);color:var(--text-primary,#111);border:1px solid var(--border,rgba(0,0,0,.1));border-radius:14px;padding:16px;width:100%;max-width:560px}
+    .att-head{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px}
+    .att-head h2{font-size:15px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+    .att-item{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--grid,#e5e5e5)}
+    .att-item .att-name{background:none;border:none;cursor:pointer;font:inherit;color:var(--series-1,#2a78d6);text-align:left;padding:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+    .att-item .att-remove{background:none;border:none;cursor:pointer;color:var(--text-muted,#888);font-size:14px}
+    .att-upload{display:inline-block;margin-top:12px;cursor:pointer}
+    #attPreview{margin-top:12px}
+    #attPreview img{max-width:100%;border-radius:10px;border:1px solid var(--border,rgba(0,0,0,.1))}
+  `;
+  document.head.appendChild(s);
+}
+
 // ----- Items modal: line items that build a category's limit -----
 
 let itemsModalCatId = null;
 
 function ensureItemsModal() {
+  ensureModalStyles();
   if (document.getElementById("itModal")) return;
   const div = document.createElement("div");
   div.id = "itModal";
@@ -685,6 +709,7 @@ function renderItemsModal() {
 let earmarkModalIds = null; // { acctId, emId }
 
 function ensureEarmarkModal() {
+  ensureModalStyles();
   if (document.getElementById("emModal")) return;
   const div = document.createElement("div");
   div.id = "emModal";
