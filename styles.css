@@ -333,6 +333,43 @@ input[type="date"], input[type="month"] { width: 150px; }
 /* Inline budget-table editors */
 .cat-limit { width: 90px; text-align: right; font-variant-numeric: tabular-nums; padding: 5px 8px; }
 .cat-class { padding: 5px 8px; }
+.acct-balance { width: 120px; text-align: right; font-variant-numeric: tabular-nums; padding: 5px 8px; }
+
+/* Attachment modal */
+.att-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 40px 16px;
+  overflow-y: auto;
+}
+.att-overlay[hidden] { display: none; }
+.att-box {
+  background: var(--surface-1);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px;
+  width: 100%;
+  max-width: 560px;
+}
+.att-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; margin-bottom: 10px; }
+.att-head h2 { font-size: 15px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.att-item { display: flex; align-items: center; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--grid); }
+.att-item .att-name {
+  background: none; border: none; cursor: pointer; font: inherit;
+  color: var(--series-1); text-align: left; padding: 0;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; min-width: 0;
+}
+.att-item .att-remove { background: none; border: none; cursor: pointer; color: var(--text-muted); font-size: 14px; }
+.att-item .att-remove:hover { color: var(--status-critical); }
+.att-upload { display: inline-block; margin-top: 12px; cursor: pointer; }
+#attPreview { margin-top: 12px; }
+#attPreview img { max-width: 100%; border-radius: 10px; border: 1px solid var(--border); }
 
 /* Receipt splitter */
 .rc-table select, .rc-table input[type="text"], .rc-table .rc-desc { width: 100%; min-width: 90px; }

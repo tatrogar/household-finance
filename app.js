@@ -50,6 +50,7 @@ function seedData() {
     bills: [],
     debts: [],
     goals: [],
+    savingsAccounts: [],  // { id, name, owner, balance, notes }
   };
 }
 
@@ -63,7 +64,7 @@ try {
 }
 // Normalize shape (covers older/imported data): guarantee every section array
 // exists, and give any recurring-income row without a pay frequency a default.
-for (const k of ["categories", "spending", "income", "oneTimeIncome", "bills", "debts", "goals"]) {
+for (const k of ["categories", "spending", "income", "oneTimeIncome", "bills", "debts", "goals", "savingsAccounts"]) {
   if (!Array.isArray(state[k])) state[k] = [];
 }
 state.income.forEach((r) => { if (!r.frequency) r.frequency = "Monthly"; });
@@ -207,6 +208,7 @@ function buildSyncPayload() {
     categories: state.categories, spending: state.spending,
     income: state.income, oneTimeIncome: state.oneTimeIncome,
     bills: state.bills, debts: state.debts, goals: state.goals,
+    savingsAccounts: state.savingsAccounts,
   });
 }
 
@@ -219,6 +221,7 @@ function adoptRemote(remote) {
     categories: arr(remote.categories), spending: arr(remote.spending),
     income: arr(remote.income), oneTimeIncome: arr(remote.oneTimeIncome),
     bills: arr(remote.bills), debts: arr(remote.debts), goals: arr(remote.goals),
+    savingsAccounts: arr(remote.savingsAccounts),
     updatedAt: typeof remote.updatedAt === "number" ? remote.updatedAt : Date.now(),
   };
   state.income.forEach((r) => { if (!r.frequency) r.frequency = "Monthly"; });
@@ -259,6 +262,7 @@ async function syncTick() {
     syncCfg.lastSyncedAt = new Date().toISOString();
     saveSyncCfg();
     setSyncStatus("ok");
+    uploadPendingAttachments(); // fire-and-forget; retried next tick on failure
   } catch (e) {
     setSyncStatus("error", e.message || String(e));
   } finally {
@@ -300,6 +304,7 @@ async function connectSync(token) {
   saveSyncCfg();
   setSyncStatus("ok");
   startAutoSync();
+  uploadPendingAttachments(); // push any documents added before connecting
 }
 
 function disconnectSync() {
@@ -330,6 +335,263 @@ function syncStatusHtml() {
 
 const uid = () => `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 
+// ---------- Expense attachments ----------
+// Binary documents (invoice photos, PDFs) are far too big for the state gist,
+// so they live in IndexedDB on each device and sync as individual files in a
+// SECOND private gist — the state gist stays small and fast to poll.
+
+const ATT_MARKER = "household-finance-attachments.marker";
+
+function idbOpen() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open("household-finance-files", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("files");
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function idbPut(id, val) {
+  const db = await idbOpen();
+  return new Promise((res, rej) => {
+    const tx = db.transaction("files", "readwrite");
+    tx.objectStore("files").put(val, id);
+    tx.oncomplete = res;
+    tx.onerror = () => rej(tx.error);
+  });
+}
+async function idbGet(id) {
+  const db = await idbOpen();
+  return new Promise((res, rej) => {
+    const q = db.transaction("files").objectStore("files").get(id);
+    q.onsuccess = () => res(q.result);
+    q.onerror = () => rej(q.error);
+  });
+}
+async function idbDel(id) {
+  const db = await idbOpen();
+  return new Promise((res, rej) => {
+    const tx = db.transaction("files", "readwrite");
+    tx.objectStore("files").delete(id);
+    tx.oncomplete = res;
+    tx.onerror = () => rej(tx.error);
+  });
+}
+
+const fileToDataUrl = (file) => new Promise((res, rej) => {
+  const r = new FileReader();
+  r.onload = () => res(r.result);
+  r.onerror = () => rej(r.error);
+  r.readAsDataURL(file);
+});
+
+// Images are resized/recompressed so a phone photo lands well under the gist
+// file limits; other documents (PDFs) are size-capped instead.
+async function prepareAttachment(file) {
+  if (file.type.startsWith("image/")) {
+    const url = await fileToDataUrl(file);
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = () => rej(new Error("Couldn't read that image.")); img.src = url; });
+    const scale = Math.min(1, 1600 / Math.max(img.width, img.height));
+    if (scale === 1 && file.size < 600 * 1024) return url;
+    const c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(img.width * scale));
+    c.height = Math.max(1, Math.round(img.height * scale));
+    c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+    return c.toDataURL("image/jpeg", 0.8);
+  }
+  if (file.size > 2 * 1024 * 1024) throw new Error(`"${file.name}" is over 2 MB — export a smaller PDF or take a photo of it instead.`);
+  return fileToDataUrl(file);
+}
+
+function dataUrlToBlobUrl(u) {
+  const [head, b64] = u.split(",");
+  const mime = (head.match(/data:(.*?)(;|$)/) || [])[1] || "application/octet-stream";
+  const bin = atob(b64);
+  const arr = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return URL.createObjectURL(new Blob([arr], { type: mime }));
+}
+
+async function attachmentGistId() {
+  if (syncCfg.attGistId) return syncCfg.attGistId;
+  const list = await fetch(`${GH_API}/gists?per_page=100`, { headers: ghHeaders(syncCfg.token) });
+  if (!list.ok) throw new Error(`Listing gists failed (${list.status})`);
+  const existing = (await list.json()).find((g) => g.files && ATT_MARKER in g.files);
+  let id;
+  if (existing) {
+    id = existing.id;
+  } else {
+    const created = await fetch(`${GH_API}/gists`, {
+      method: "POST",
+      headers: { ...ghHeaders(syncCfg.token), "Content-Type": "application/json" },
+      body: JSON.stringify({ description: "Household Finance attachments", public: false, files: { [ATT_MARKER]: { content: "attachment store — managed by the app" } } }),
+    });
+    if (!created.ok) throw new Error(`Creating the attachment store failed (${created.status})`);
+    id = (await created.json()).id;
+  }
+  syncCfg.attGistId = id;
+  saveSyncCfg();
+  return id;
+}
+
+async function pushAttachmentFile(id, content) {
+  const gid = await attachmentGistId();
+  const res = await fetch(`${GH_API}/gists/${gid}`, {
+    method: "PATCH",
+    headers: { ...ghHeaders(syncCfg.token), "Content-Type": "application/json" },
+    body: JSON.stringify({ files: { [`att-${id}.txt`]: { content } } }),
+  });
+  if (!res.ok) throw new Error(`Attachment upload failed (${res.status})`);
+}
+
+async function pullAttachmentFile(id) {
+  const gid = await attachmentGistId();
+  const res = await fetch(`${GH_API}/gists/${gid}`, { headers: ghHeaders(syncCfg.token) });
+  if (!res.ok) throw new Error(`Fetching attachments failed (${res.status})`);
+  const f = (await res.json()).files?.[`att-${id}.txt`];
+  if (!f) throw new Error("This document isn't in the cloud yet — open it on the device it was added from so it can sync up.");
+  let content = f.content;
+  if (f.truncated) {
+    const raw = await fetch(f.raw_url, { headers: ghHeaders(syncCfg.token) });
+    if (!raw.ok) throw new Error(`Fetching the document failed (${raw.status})`);
+    content = await raw.text();
+  }
+  await idbPut(id, content);
+  return content;
+}
+
+async function deleteAttachmentFile(id) {
+  try {
+    const gid = await attachmentGistId();
+    await fetch(`${GH_API}/gists/${gid}`, {
+      method: "PATCH",
+      headers: { ...ghHeaders(syncCfg.token), "Content-Type": "application/json" },
+      body: JSON.stringify({ files: { [`att-${id}.txt`]: null } }),
+    });
+  } catch { /* best effort — orphaned cloud files are harmless */ }
+}
+
+// Push any attachment added on this device that hasn't reached the cloud yet.
+async function uploadPendingAttachments() {
+  if (!isConnected()) return;
+  for (const row of state.spending) {
+    for (const att of row.attachments || []) {
+      if (att.up) continue;
+      const data = await idbGet(att.id).catch(() => null);
+      if (!data) continue; // added on another device; nothing to push from here
+      try {
+        await pushAttachmentFile(att.id, data);
+        att.up = true;
+        persist();
+      } catch { /* retried on the next sync tick */ }
+    }
+  }
+}
+
+// ----- Attachment modal (one shared overlay, opened per expense) -----
+
+let attModalExpenseId = null;
+
+function ensureAttModal() {
+  if (document.getElementById("attModal")) return;
+  const div = document.createElement("div");
+  div.id = "attModal";
+  div.className = "att-overlay";
+  div.hidden = true;
+  div.innerHTML = `<div class="att-box">
+    <div class="att-head"><h2 id="attTitle">Attachments</h2><button id="attClose" class="ghost-btn" title="Close">✕</button></div>
+    <div id="attList"></div>
+    <label class="secondary-btn att-upload">＋ Add photo or document<input id="attFile" type="file" accept="image/*,application/pdf" multiple hidden></label>
+    <p class="card-note">Photos are compressed automatically; PDFs up to 2 MB. Documents sync privately so both of you can open them.</p>
+    <div id="attPreview"></div>
+  </div>`;
+  document.body.appendChild(div);
+  div.addEventListener("click", (ev) => { if (ev.target === div) closeAttModal(); });
+  div.querySelector("#attClose").addEventListener("click", closeAttModal);
+  div.querySelector("#attFile").addEventListener("change", async (ev) => {
+    const row = state.spending.find((r) => r.id === attModalExpenseId);
+    if (!row) return;
+    for (const file of ev.target.files) {
+      try {
+        const data = await prepareAttachment(file);
+        const att = { id: uid(), name: file.name, up: false };
+        await idbPut(att.id, data);
+        (row.attachments ||= []).push(att);
+      } catch (err) {
+        alert(err.message || String(err));
+      }
+    }
+    ev.target.value = "";
+    save();
+    renderAll();
+    renderAttModal();
+    if (isConnected()) uploadPendingAttachments().then(() => { renderAttModal(); });
+  });
+}
+
+function openAttModal(expenseId) {
+  ensureAttModal();
+  attModalExpenseId = expenseId;
+  renderAttModal();
+  document.getElementById("attModal").hidden = false;
+}
+function closeAttModal() {
+  attModalExpenseId = null;
+  const m = document.getElementById("attModal");
+  if (m) { m.hidden = true; m.querySelector("#attPreview").innerHTML = ""; }
+}
+
+function renderAttModal() {
+  const m = document.getElementById("attModal");
+  const row = state.spending.find((r) => r.id === attModalExpenseId);
+  if (!m || !row) return;
+  m.querySelector("#attTitle").textContent = `Attachments — ${row.desc}`;
+  const atts = row.attachments || [];
+  m.querySelector("#attList").innerHTML = atts.length
+    ? atts.map((a) => `<div class="att-item">
+        <button class="att-name" data-view="${a.id}">${esc(a.name)}</button>
+        <span class="muted">${a.up ? "☁ synced" : "on this device"}</span>
+        <button class="att-remove" data-remove="${a.id}" title="Remove">✕</button>
+      </div>`).join("")
+    : `<p class="empty-note">No documents attached yet.</p>`;
+
+  m.querySelectorAll("[data-view]").forEach((b) => b.addEventListener("click", async () => {
+    const prev = m.querySelector("#attPreview");
+    prev.innerHTML = `<p class="card-note">Loading…</p>`;
+    try {
+      let data = await idbGet(b.dataset.view).catch(() => null);
+      if (!data) {
+        if (!isConnected()) throw new Error("This document was added on another device — connect sync to fetch it.");
+        data = await pullAttachmentFile(b.dataset.view);
+        renderAttModal();
+        return void openPreview(m, data);
+      }
+      openPreview(m, data);
+    } catch (err) {
+      prev.innerHTML = `<p class="card-note neg">${esc(err.message || String(err))}</p>`;
+    }
+  }));
+  m.querySelectorAll("[data-remove]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("Remove this document?")) return;
+    row.attachments = (row.attachments || []).filter((a) => a.id !== b.dataset.remove);
+    idbDel(b.dataset.remove).catch(() => {});
+    if (isConnected()) deleteAttachmentFile(b.dataset.remove);
+    save();
+    renderAll();
+    renderAttModal();
+  }));
+}
+
+function openPreview(m, data) {
+  const prev = m.querySelector("#attPreview");
+  if (data.startsWith("data:image/")) {
+    prev.innerHTML = `<img src="${data}" alt="attachment preview">`;
+  } else {
+    prev.innerHTML = "";
+    window.open(dataUrlToBlobUrl(data), "_blank");
+  }
+}
+
 // Which month each tab is looking at (YYYY-MM), defaults to today.
 let selectedMonth = new Date().toISOString().slice(0, 7);
 let editing = {}; // per-entity id currently loaded into the tab's form
@@ -349,6 +611,7 @@ const totalBills = () => state.bills.reduce((s, b) => s + monthlyEquivalent(b), 
 const totalMinPayments = () => state.debts.reduce((s, d) => s + d.minPayment, 0);
 const totalGoalContributions = () => state.goals.reduce((s, g) => s + g.monthly, 0);
 const totalBudgeted = () => state.categories.reduce((s, c) => s + c.limit, 0);
+const totalSavings = () => state.savingsAccounts.reduce((s, a) => s + a.balance, 0);
 
 // 50/30/20 axis. A category has a default class; a spending row may override it.
 const categoryClass = (name) => state.categories.find((c) => c.name === name)?.class || "Need";
@@ -551,6 +814,7 @@ function renderDashboard(el) {
       ${statTile("Recurring bills", fmtMoney(totalBills()), "monthly equivalent")}
       ${statTile("Debt minimums", fmtMoney(totalMinPayments()), "required per month")}
       ${statTile("Goal contributions", fmtMoney(totalGoalContributions()), "toward savings goals")}
+      ${statTile("In savings", fmtMoney(totalSavings()), "across all accounts")}
       ${statTile("Total budgeted", fmtMoney(budgeted), "sum of category limits")}
     </div>
     ${fiftyThirtyTwentyCard(month)}
@@ -754,7 +1018,7 @@ function renderSpending(el) {
             <td class="secondary">${esc(effectiveClass(r))}${r.class ? " ·" : ""}</td>
             <td class="secondary">${esc(r.account)}</td>
             <td class="num">${fmtMoney(r.amount, true)}</td>
-            <td class="row-actions"><button data-edit="${r.id}">Edit</button><button data-del="${r.id}">Delete</button></td>
+            <td class="row-actions"><button data-att="${r.id}" title="Attach documents">📎${r.attachments?.length ? ` ${r.attachments.length}` : ""}</button><button data-edit="${r.id}">Edit</button><button data-del="${r.id}">Delete</button></td>
           </tr>`).join("") || `<tr><td colspan="7" class="empty-note">Nothing logged for ${fmtMonth(month)} yet.</td></tr>`}
         </tbody>
       </table></div>
@@ -781,8 +1045,14 @@ function renderSpending(el) {
     save(); renderAll();
   });
   el.querySelector("#cancelSpend")?.addEventListener("click", () => { editing.spending = null; renderAll(); });
+  el.querySelectorAll("[data-att]").forEach((b) => b.addEventListener("click", () => openAttModal(b.dataset.att)));
   el.querySelectorAll("[data-edit]").forEach((b) => b.addEventListener("click", () => { editing.spending = b.dataset.edit; renderAll(); }));
   el.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", () => {
+    const row = state.spending.find((r) => r.id === b.dataset.del);
+    for (const att of row?.attachments || []) {
+      idbDel(att.id).catch(() => {});
+      if (isConnected()) deleteAttachmentFile(att.id);
+    }
     state.spending = state.spending.filter((r) => r.id !== b.dataset.del);
     save(); renderAll();
   }));
@@ -1185,7 +1455,38 @@ function renderDebts(el) {
 
 function renderGoals(el) {
   const e = editing.goal ? state.goals.find((g) => g.id === editing.goal) : null;
+  const ea = editing.account ? state.savingsAccounts.find((a) => a.id === editing.account) : null;
   el.innerHTML = `
+    <div class="kpi-row">
+      ${statTile("Total in savings", fmtMoney(totalSavings()), "across all accounts")}
+      ${statTile("Goal targets", fmtMoney(state.goals.reduce((s, g) => s + g.target, 0)), "sum of all goal targets")}
+      ${statTile("Monthly contributions", fmtMoney(totalGoalContributions()), "toward goals")}
+    </div>
+    <div class="card">
+      <h2>Savings accounts</h2>
+      <p class="card-note">Each real account where your savings live — name it, say whose it is, and keep the balance current. Type a new balance right in the table; it saves when you leave the field.</p>
+      <form id="accountForm" class="form-grid">
+        <div class="field"><label>Account name</label><input name="name" required value="${esc(ea?.name ?? "")}" placeholder="e.g. Ally joint savings"></div>
+        <div class="field"><label>Owner</label><select name="owner">${ownerOptions(ea?.owner ?? "Joint")}</select></div>
+        <div class="field"><label>Balance</label><input name="balance" type="number" step="0.01" min="0" required value="${ea?.balance ?? ""}"></div>
+        <div class="field"><label>Notes</label><input name="notes" value="${esc(ea?.notes ?? "")}" placeholder="e.g. emergency fund lives here"></div>
+        <button class="primary-btn">${ea ? "Update" : "Add account"}</button>
+        ${ea ? `<button type="button" class="secondary-btn" id="cancelAccount">Cancel</button>` : ""}
+      </form>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Account</th><th>Owner</th><th class="num">Balance</th><th>Notes</th><th></th></tr></thead>
+        <tbody>
+          ${state.savingsAccounts.map((a) => `<tr>
+            <td>${esc(a.name)}</td>
+            <td class="secondary">${esc(a.owner)}</td>
+            <td class="num"><input class="acct-balance" data-id="${a.id}" type="number" step="0.01" min="0" inputmode="decimal" value="${a.balance}"></td>
+            <td class="muted">${esc(a.notes)}</td>
+            <td class="row-actions"><button data-edit-acct="${a.id}">Rename</button><button data-del-acct="${a.id}">Delete</button></td>
+          </tr>`).join("") || `<tr><td colspan="5" class="empty-note">No savings accounts yet — add your first one above.</td></tr>`}
+          ${state.savingsAccounts.length ? `<tr class="total-row"><td>TOTAL SAVINGS</td><td></td><td class="num">${fmtMoney(totalSavings(), true)}</td><td></td><td></td></tr>` : ""}
+        </tbody>
+      </table></div>
+    </div>
     <div class="card">
       <h2>Savings goals</h2>
       <p class="card-note">Update "saved so far" monthly. Months remaining assumes the monthly contribution holds.</p>
@@ -1235,6 +1536,35 @@ function renderGoals(el) {
   el.querySelectorAll("[data-edit]").forEach((b) => b.addEventListener("click", () => { editing.goal = b.dataset.edit; renderAll(); }));
   el.querySelectorAll("[data-del]").forEach((b) => b.addEventListener("click", () => {
     state.goals = state.goals.filter((g) => g.id !== b.dataset.del);
+    save(); renderAll();
+  }));
+
+  // Savings accounts
+  el.querySelector("#accountForm").addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const f = new FormData(ev.target);
+    const rec = { name: f.get("name").trim(), owner: f.get("owner"), balance: +f.get("balance") || 0, notes: f.get("notes").trim() };
+    if (!rec.name) return;
+    if (ea) { Object.assign(ea, rec); editing.account = null; }
+    else state.savingsAccounts.push({ id: uid(), ...rec });
+    save(); renderAll();
+  });
+  el.querySelector("#cancelAccount")?.addEventListener("click", () => { editing.account = null; renderAll(); });
+  el.querySelectorAll("[data-edit-acct]").forEach((b) => b.addEventListener("click", () => {
+    editing.account = b.dataset.editAcct;
+    renderAll();
+    document.querySelector("#accountForm")?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }));
+  el.querySelectorAll("[data-del-acct]").forEach((b) => b.addEventListener("click", () => {
+    const a = state.savingsAccounts.find((x) => x.id === b.dataset.delAcct);
+    if (!confirm(`Delete "${a.name}"?`)) return;
+    state.savingsAccounts = state.savingsAccounts.filter((x) => x.id !== b.dataset.delAcct);
+    save(); renderAll();
+  }));
+  el.querySelectorAll(".acct-balance").forEach((inp) => inp.addEventListener("change", () => {
+    const a = state.savingsAccounts.find((x) => x.id === inp.dataset.id);
+    if (!a) return;
+    a.balance = Math.max(0, +inp.value || 0);
     save(); renderAll();
   }));
 }
@@ -1314,6 +1644,7 @@ function renderData(el) {
         taxRate: typeof data.taxRate === "number" ? data.taxRate : 0,
         ...Object.fromEntries(keys.map((k) => [k, data[k]])),
         oneTimeIncome: Array.isArray(data.oneTimeIncome) ? data.oneTimeIncome : [],
+        savingsAccounts: Array.isArray(data.savingsAccounts) ? data.savingsAccounts : [],
       };
       state.income.forEach((r) => { if (!r.frequency) r.frequency = "Monthly"; });
       state.categories.forEach((c) => { if (!CLASSES.includes(c.class)) c.class = DEFAULT_CLASS_BY_NAME[c.name] || "Need"; });

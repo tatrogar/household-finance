@@ -28,7 +28,7 @@ function freshState() {
     household: "Garrett & Lizzie",
     taxRate: 0,
     categories: STARTER_CATEGORIES.map(([name, cls]) => ({ id: `seed-${++n}`, name, limit: 0, class: cls })),
-    spending: [], income: [], oneTimeIncome: [], bills: [], debts: [], goals: [],
+    spending: [], income: [], oneTimeIncome: [], bills: [], debts: [], goals: [], savingsAccounts: [],
     updatedAt: 0,
   };
 }
@@ -36,7 +36,7 @@ function freshState() {
 let state;
 try { state = JSON.parse(localStorage.getItem(STORAGE_KEY)); } catch { state = null; }
 if (!state || typeof state !== "object") state = freshState();
-for (const k of ["categories", "spending", "income", "oneTimeIncome", "bills", "debts", "goals"]) {
+for (const k of ["categories", "spending", "income", "oneTimeIncome", "bills", "debts", "goals", "savingsAccounts"]) {
   if (!Array.isArray(state[k])) state[k] = [];
 }
 if (typeof state.updatedAt !== "number") state.updatedAt = 0;
@@ -107,6 +107,7 @@ function buildPayload() {
     taxRate: state.taxRate ?? 0,
     categories: state.categories, spending: state.spending, income: state.income,
     oneTimeIncome: state.oneTimeIncome, bills: state.bills, debts: state.debts, goals: state.goals,
+    savingsAccounts: state.savingsAccounts,
   });
 }
 
@@ -118,6 +119,7 @@ function adoptRemote(remote) {
     categories: arr(remote.categories), spending: arr(remote.spending),
     income: arr(remote.income), oneTimeIncome: arr(remote.oneTimeIncome),
     bills: arr(remote.bills), debts: arr(remote.debts), goals: arr(remote.goals),
+    savingsAccounts: arr(remote.savingsAccounts),
     updatedAt: typeof remote.updatedAt === "number" ? remote.updatedAt : Date.now(),
   };
   state.income.forEach((r) => { if (!r.frequency) r.frequency = "Monthly"; });
