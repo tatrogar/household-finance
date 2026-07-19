@@ -335,6 +335,18 @@ input[type="date"], input[type="month"] { width: 150px; }
 .cat-class { padding: 5px 8px; }
 .acct-balance { width: 120px; text-align: right; font-variant-numeric: tabular-nums; padding: 5px 8px; }
 
+/* Overages */
+.ovg-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--grid);
+  font-size: 14px;
+}
+.ovg-row:last-child { border-bottom: none; }
+
 /* Attachment modal */
 .att-overlay {
   position: fixed;

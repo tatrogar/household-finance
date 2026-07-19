@@ -105,6 +105,7 @@ function buildPayload() {
   return JSON.stringify({
     version: 2, updatedAt: state.updatedAt ?? Date.now(), household: state.household,
     taxRate: state.taxRate ?? 0,
+    overageAccountId: state.overageAccountId ?? null,
     categories: state.categories, spending: state.spending, income: state.income,
     oneTimeIncome: state.oneTimeIncome, bills: state.bills, debts: state.debts, goals: state.goals,
     savingsAccounts: state.savingsAccounts,
@@ -116,6 +117,7 @@ function adoptRemote(remote) {
   state = {
     household: String(remote.household ?? "Garrett & Lizzie"),
     taxRate: typeof remote.taxRate === "number" ? remote.taxRate : 0,
+    overageAccountId: remote.overageAccountId ?? null,
     categories: arr(remote.categories), spending: arr(remote.spending),
     income: arr(remote.income), oneTimeIncome: arr(remote.oneTimeIncome),
     bills: arr(remote.bills), debts: arr(remote.debts), goals: arr(remote.goals),

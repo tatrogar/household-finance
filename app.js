@@ -72,6 +72,22 @@ state.categories.forEach((c) => { if (!CLASSES.includes(c.class)) c.class = DEFA
 if (typeof state.taxRate !== "number") state.taxRate = 0;
 if (typeof state.updatedAt !== "number") state.updatedAt = 0;
 
+// Category line items (e.g. Subscriptions → Netflix, Hulu): when present they
+// define the category's limit. Savings accounts carry earmarks with a dated
+// entry history; an earmark's balance is the sum of its entries.
+function normalizeStructures() {
+  state.categories.forEach((c) => {
+    if (!Array.isArray(c.items)) c.items = [];
+    if (c.items.length) c.limit = Math.round(c.items.reduce((s, i) => s + (+i.amount || 0), 0) * 100) / 100;
+  });
+  state.savingsAccounts.forEach((a) => {
+    if (!Array.isArray(a.earmarks)) a.earmarks = [];
+    a.earmarks.forEach((e) => { if (!Array.isArray(e.entries)) e.entries = []; });
+  });
+}
+normalizeStructures();
+const earmarkBalance = (e) => Math.round(e.entries.reduce((s, en) => s + en.amount, 0) * 100) / 100;
+
 // ---------- Bill due dates ----------
 
 const todayStr = () => new Date().toISOString().slice(0, 10);
@@ -205,6 +221,7 @@ function buildSyncPayload() {
     updatedAt: state.updatedAt ?? Date.now(),
     household: state.household,
     taxRate: state.taxRate ?? 0,
+    overageAccountId: state.overageAccountId ?? null,
     categories: state.categories, spending: state.spending,
     income: state.income, oneTimeIncome: state.oneTimeIncome,
     bills: state.bills, debts: state.debts, goals: state.goals,
@@ -218,6 +235,7 @@ function adoptRemote(remote) {
   state = {
     household: String(remote.household ?? "Our Household"),
     taxRate: typeof remote.taxRate === "number" ? remote.taxRate : 0,
+    overageAccountId: remote.overageAccountId ?? null,
     categories: arr(remote.categories), spending: arr(remote.spending),
     income: arr(remote.income), oneTimeIncome: arr(remote.oneTimeIncome),
     bills: arr(remote.bills), debts: arr(remote.debts), goals: arr(remote.goals),
@@ -227,6 +245,7 @@ function adoptRemote(remote) {
   state.income.forEach((r) => { if (!r.frequency) r.frequency = "Monthly"; });
   state.categories.forEach((c) => { if (!CLASSES.includes(c.class)) c.class = DEFAULT_CLASS_BY_NAME[c.name] || "Need"; });
   normalizeBills();
+  normalizeStructures();
   persist();
   syncCfg.lastSyncedStamp = state.updatedAt;
   saveSyncCfg();
@@ -592,6 +611,169 @@ function openPreview(m, data) {
   }
 }
 
+// ----- Items modal: line items that build a category's limit -----
+
+let itemsModalCatId = null;
+
+function ensureItemsModal() {
+  if (document.getElementById("itModal")) return;
+  const div = document.createElement("div");
+  div.id = "itModal";
+  div.className = "att-overlay";
+  div.hidden = true;
+  div.innerHTML = `<div class="att-box">
+    <div class="att-head"><h2 id="itTitle">Items</h2><button id="itClose" class="ghost-btn" title="Close">✕</button></div>
+    <p class="card-note">List what makes up this category (e.g. Netflix, Hulu). Their monthly costs add up to the category's limit automatically.</p>
+    <div id="itList"></div>
+    <form id="itForm" class="form-grid">
+      <div class="field" style="flex:1"><label>Item</label><input name="name" required placeholder="e.g. Netflix"></div>
+      <div class="field"><label>Monthly cost</label><input name="amount" type="number" step="0.01" min="0.01" required style="width:110px"></div>
+      <button class="primary-btn">Add</button>
+    </form>
+    <div class="rc-summary" id="itSum"></div>
+  </div>`;
+  document.body.appendChild(div);
+  div.addEventListener("click", (ev) => { if (ev.target === div) closeItemsModal(); });
+  div.querySelector("#itClose").addEventListener("click", closeItemsModal);
+  div.querySelector("#itForm").addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const c = state.categories.find((x) => x.id === itemsModalCatId);
+    if (!c) return;
+    const f = new FormData(ev.target);
+    c.items.push({ id: uid(), name: f.get("name").trim(), amount: +f.get("amount") });
+    normalizeStructures();
+    ev.target.reset();
+    save(); renderAll(); renderItemsModal();
+  });
+}
+
+function openItemsModal(catId) {
+  ensureItemsModal();
+  itemsModalCatId = catId;
+  renderItemsModal();
+  document.getElementById("itModal").hidden = false;
+}
+function closeItemsModal() {
+  itemsModalCatId = null;
+  const m = document.getElementById("itModal");
+  if (m) m.hidden = true;
+}
+
+function renderItemsModal() {
+  const m = document.getElementById("itModal");
+  const c = state.categories.find((x) => x.id === itemsModalCatId);
+  if (!m || !c) return;
+  m.querySelector("#itTitle").textContent = `Items — ${c.name}`;
+  m.querySelector("#itList").innerHTML = c.items.length
+    ? c.items.map((i) => `<div class="att-item">
+        <span style="flex:1">${esc(i.name)}</span>
+        <span class="secondary">${fmtMoney(i.amount, true)}/mo</span>
+        <button class="att-remove" data-del-item="${i.id}" title="Remove">✕</button>
+      </div>`).join("")
+    : `<p class="empty-note">No items yet — the limit stays manually editable until you add one.</p>`;
+  m.querySelector("#itSum").innerHTML = c.items.length
+    ? `Category limit: <strong>${fmtMoney(c.limit, true)}/mo</strong> (sum of items)` : "";
+  m.querySelectorAll("[data-del-item]").forEach((b) => b.addEventListener("click", () => {
+    c.items = c.items.filter((i) => i.id !== b.dataset.delItem);
+    normalizeStructures();
+    save(); renderAll(); renderItemsModal();
+  }));
+}
+
+// ----- Earmark modal: dated add/pull history inside a savings account -----
+
+let earmarkModalIds = null; // { acctId, emId }
+
+function ensureEarmarkModal() {
+  if (document.getElementById("emModal")) return;
+  const div = document.createElement("div");
+  div.id = "emModal";
+  div.className = "att-overlay";
+  div.hidden = true;
+  div.innerHTML = `<div class="att-box">
+    <div class="att-head"><h2 id="emTitle">Earmark</h2><button id="emClose" class="ghost-btn" title="Close">✕</button></div>
+    <p class="card-note" id="emSub"></p>
+    <div class="toolbar" id="emQuick"></div>
+    <form id="emForm" class="form-grid">
+      <div class="field"><label>Date</label><input name="date" type="date" required></div>
+      <div class="field"><label>Add / Pull</label><select name="dir"><option value="1">Add to earmark</option><option value="-1">Pull from earmark</option></select></div>
+      <div class="field"><label>Amount</label><input name="amount" type="number" step="0.01" min="0.01" required style="width:110px"></div>
+      <div class="field" style="flex:1"><label>Note</label><input name="note" placeholder="e.g. oil change"></div>
+      <button class="primary-btn">Record</button>
+    </form>
+    <p class="card-note">Adds and pulls also update the account's balance, since the money really enters or leaves that account.</p>
+    <div id="emHistory"></div>
+  </div>`;
+  document.body.appendChild(div);
+  div.addEventListener("click", (ev) => { if (ev.target === div) closeEarmarkModal(); });
+  div.querySelector("#emClose").addEventListener("click", closeEarmarkModal);
+  div.querySelector("#emForm").addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const ctx = earmarkCtx();
+    if (!ctx) return;
+    const f = new FormData(ev.target);
+    const amount = Math.round(+f.get("amount") * +f.get("dir") * 100) / 100;
+    if (!amount) return;
+    ctx.em.entries.push({ id: uid(), date: f.get("date") || todayStr(), amount, note: f.get("note").trim() });
+    ctx.acct.balance = Math.max(0, Math.round((ctx.acct.balance + amount) * 100) / 100);
+    ev.target.reset();
+    div.querySelector('#emForm input[name="date"]').value = todayStr();
+    save(); renderAll(); renderEarmarkModal();
+  });
+}
+
+const earmarkCtx = () => {
+  if (!earmarkModalIds) return null;
+  const acct = state.savingsAccounts.find((a) => a.id === earmarkModalIds.acctId);
+  const em = acct?.earmarks.find((e) => e.id === earmarkModalIds.emId);
+  return acct && em ? { acct, em } : null;
+};
+
+function openEarmarkModal(acctId, emId) {
+  ensureEarmarkModal();
+  earmarkModalIds = { acctId, emId };
+  document.querySelector('#emForm input[name="date"]').value = todayStr();
+  renderEarmarkModal();
+  document.getElementById("emModal").hidden = false;
+}
+function closeEarmarkModal() {
+  earmarkModalIds = null;
+  const m = document.getElementById("emModal");
+  if (m) m.hidden = true;
+}
+
+function renderEarmarkModal() {
+  const m = document.getElementById("emModal");
+  const ctx = earmarkCtx();
+  if (!m || !ctx) return;
+  const { acct, em } = ctx;
+  m.querySelector("#emTitle").textContent = `${em.name} — ${acct.name}`;
+  m.querySelector("#emSub").innerHTML = `Balance <strong>${fmtMoney(earmarkBalance(em), true)}</strong>${em.monthly > 0 ? ` · plan ${fmtMoney(em.monthly)}/mo` : ""}`;
+  m.querySelector("#emQuick").innerHTML = em.monthly > 0
+    ? `<button class="secondary-btn" id="emQuickAdd">＋ Record this month's ${fmtMoney(em.monthly)}</button>` : "";
+  m.querySelector("#emQuickAdd")?.addEventListener("click", () => {
+    em.entries.push({ id: uid(), date: todayStr(), amount: em.monthly, note: "monthly set-aside" });
+    acct.balance = Math.round((acct.balance + em.monthly) * 100) / 100;
+    save(); renderAll(); renderEarmarkModal();
+  });
+  const entries = [...em.entries].sort((a, b) => b.date.localeCompare(a.date));
+  m.querySelector("#emHistory").innerHTML = entries.length
+    ? entries.map((en) => `<div class="att-item">
+        <span class="secondary" style="white-space:nowrap">${en.date}</span>
+        <span style="flex:1">${esc(en.note || (en.amount >= 0 ? "added" : "pulled"))}</span>
+        <span class="${en.amount >= 0 ? "pos" : "neg"}" style="font-variant-numeric:tabular-nums">${en.amount >= 0 ? "+" : "−"}${fmtMoney(Math.abs(en.amount), true)}</span>
+        <button class="att-remove" data-del-entry="${en.id}" title="Remove entry">✕</button>
+      </div>`).join("")
+    : `<p class="empty-note">No history yet.</p>`;
+  m.querySelectorAll("[data-del-entry]").forEach((b) => b.addEventListener("click", () => {
+    const en = em.entries.find((x) => x.id === b.dataset.delEntry);
+    if (!en || !confirm("Remove this entry? The account balance is adjusted back.")) return;
+    em.entries = em.entries.filter((x) => x.id !== en.id);
+    acct.balance = Math.max(0, Math.round((acct.balance - en.amount) * 100) / 100);
+    save(); renderAll(); renderEarmarkModal();
+  }));
+}
+
 // Which month each tab is looking at (YYYY-MM), defaults to today.
 let selectedMonth = new Date().toISOString().slice(0, 7);
 let editing = {}; // per-entity id currently loaded into the tab's form
@@ -854,6 +1036,56 @@ function renderDashboard(el) {
   bindChartHover(el.querySelector("#dashChart"));
 }
 
+// ----- Overages: leftovers from marked categories move into an "Overages"
+// earmark on a chosen savings account, with a dated entry per move. -----
+
+function overageEarmark(create = false) {
+  const acct = state.savingsAccounts.find((a) => a.id === state.overageAccountId);
+  if (!acct) return null;
+  let em = acct.earmarks.find((e) => e.name === "Overages");
+  if (!em && create) {
+    em = { id: uid(), name: "Overages", monthly: 0, entries: [] };
+    acct.earmarks.push(em);
+  }
+  return em ? { acct, em } : { acct, em: null };
+}
+
+function overageMoved(catId, month) {
+  const o = overageEarmark();
+  return Boolean(o?.em?.entries.some((en) => en.srcCat === catId && en.month === month));
+}
+
+function overagesCard(month, rows) {
+  const marked = rows.filter((r) => r.overage);
+  if (!marked.length) return "";
+  const acctOptions = state.savingsAccounts
+    .map((a) => `<option value="${a.id}" ${a.id === state.overageAccountId ? "selected" : ""}>${esc(a.name)}</option>`).join("");
+  const body = !state.savingsAccounts.length
+    ? `<p class="empty-note">Add a savings account on the Savings tab first, then pick it here as the overage destination.</p>`
+    : marked.map((r) => {
+        const leftover = Math.round((r.limit - r.actual) * 100) / 100;
+        const moved = overageMoved(r.id, month);
+        const btn = moved
+          ? `<span class="pos">Moved ✓</span>`
+          : leftover > 0 && state.overageAccountId
+            ? `<button class="secondary-btn" data-move-ovg="${r.id}" data-amt="${leftover}">Move ${fmtMoney(leftover, true)}</button>`
+            : `<span class="muted">${leftover <= 0 ? "nothing left" : "pick an account"}</span>`;
+        return `<div class="ovg-row">
+          <span>${esc(r.name)} <span class="muted">· ${fmtMoney(r.actual, true)} of ${fmtMoney(r.limit)}</span></span>
+          ${btn}
+        </div>`;
+      }).join("");
+  return `<div class="card">
+    <div class="toolbar">
+      <h2 style="margin:0">Overages — ${fmtMonth(month)}</h2>
+      <div class="spacer"></div>
+      <div class="field"><label>Destination account</label><select id="ovgAccount"><option value="">— choose —</option>${acctOptions}</select></div>
+    </div>
+    <p class="card-note">Leftovers from your marked categories. After you move the money at the bank, tap Move — it records a dated entry in the account's "Overages" earmark and bumps its balance. Pull from it on the Savings tab when a month runs over.</p>
+    ${body}
+  </div>`;
+}
+
 // How the Budget tab orders categories — a per-device preference.
 let budgetSort = localStorage.getItem("household-finance-budget-sort") || "class";
 const BUDGET_SORTS = {
@@ -905,24 +1137,27 @@ function renderBudget(el) {
         ${e ? `<button type="button" class="secondary-btn" id="cancelCategory">Cancel</button>` : ""}
       </form>
       <div class="table-wrap"><table>
-        <thead><tr><th>Category</th><th>Class</th><th class="num">Monthly limit</th><th class="num">${fmtMonth(month, true)} actual</th><th class="num">YTD actual</th><th class="num">YTD vs limit</th><th></th></tr></thead>
+        <thead><tr><th>Category</th><th>Class</th><th title="Leftovers from this category can be moved to your Overages account">Overage</th><th class="num">Monthly limit</th><th class="num">${fmtMonth(month, true)} actual</th><th class="num">YTD actual</th><th class="num">YTD vs limit</th><th></th></tr></thead>
         <tbody>
           ${rows.map((r) => `<tr>
             <td>${esc(r.name)}</td>
             <td><select class="cat-class" data-id="${r.id}">${classOptions(r.class)}</select></td>
-            <td class="num"><input class="cat-limit" data-id="${r.id}" type="number" min="0" step="1" inputmode="numeric" value="${r.limit}"></td>
+            <td style="text-align:center"><input type="checkbox" class="cat-overage" data-id="${r.id}" ${r.overage ? "checked" : ""}></td>
+            <td class="num"><input class="cat-limit" data-id="${r.id}" type="number" min="0" step="1" inputmode="numeric" value="${r.limit}" ${r.items.length ? 'disabled title="Set by its items — edit them via the Items button"' : ""}></td>
             <td class="num">${fmtMoney(r.actual, true)}</td>
             <td class="num">${fmtMoney(r.ytd, true)}</td>
             <td class="num ${r.ytdVs >= 0 ? "pos" : "neg"}">${r.ytd > 0 ? fmtMoney(r.ytdVs, true) : '<span class="muted">—</span>'}</td>
             <td class="row-actions">
+              <button data-items="${r.id}">Items${r.items.length ? ` (${r.items.length})` : ""}</button>
               <button data-edit="${r.id}">Rename</button>
               <button data-del="${r.id}">Delete</button>
             </td>
           </tr>`).join("")}
-          <tr class="total-row"><td>TOTAL</td><td></td><td class="num">${fmtMoney(totalBudgeted())}</td><td class="num">${fmtMoney(totActual, true)}</td><td class="num">${fmtMoney(totYtd, true)}</td><td></td><td></td></tr>
+          <tr class="total-row"><td>TOTAL</td><td></td><td></td><td class="num">${fmtMoney(totalBudgeted())}</td><td class="num">${fmtMoney(totActual, true)}</td><td class="num">${fmtMoney(totYtd, true)}</td><td></td><td></td></tr>
         </tbody>
       </table></div>
-    </div>`;
+    </div>
+    ${overagesCard(month, rows)}`;
 
   el.querySelector("#budgetMonth").addEventListener("change", (ev) => {
     if (ev.target.value) { selectedMonth = ev.target.value; renderAll(); }
@@ -965,7 +1200,7 @@ function renderBudget(el) {
   // Inline edits in the table: commit on change (blur / Enter / select).
   el.querySelectorAll(".cat-limit").forEach((inp) => inp.addEventListener("change", () => {
     const c = state.categories.find((x) => x.id === inp.dataset.id);
-    if (!c) return;
+    if (!c || c.items.length) return;
     c.limit = Math.max(0, +inp.value || 0);
     save(); renderAll();
   }));
@@ -973,6 +1208,28 @@ function renderBudget(el) {
     const c = state.categories.find((x) => x.id === sel.dataset.id);
     if (!c) return;
     c.class = sel.value;
+    save(); renderAll();
+  }));
+  el.querySelectorAll(".cat-overage").forEach((box) => box.addEventListener("change", () => {
+    const c = state.categories.find((x) => x.id === box.dataset.id);
+    if (!c) return;
+    c.overage = box.checked;
+    save(); renderAll();
+  }));
+  el.querySelectorAll("[data-items]").forEach((b) => b.addEventListener("click", () => openItemsModal(b.dataset.items)));
+
+  // Overages card
+  el.querySelector("#ovgAccount")?.addEventListener("change", (ev) => {
+    state.overageAccountId = ev.target.value || null;
+    save(); renderAll();
+  });
+  el.querySelectorAll("[data-move-ovg]").forEach((b) => b.addEventListener("click", () => {
+    const cat = state.categories.find((c) => c.id === b.dataset.moveOvg);
+    const amt = +b.dataset.amt;
+    const o = overageEarmark(true);
+    if (!cat || !o?.acct || !(amt > 0)) return;
+    o.em.entries.push({ id: uid(), date: todayStr(), amount: amt, note: `${cat.name} leftover — ${fmtMonth(month)}`, srcCat: cat.id, month });
+    o.acct.balance = Math.round((o.acct.balance + amt) * 100) / 100;
     save(); renderAll();
   }));
 }
@@ -1488,6 +1745,29 @@ function renderGoals(el) {
       </table></div>
     </div>
     <div class="card">
+      <h2>Earmarks</h2>
+      <p class="card-note">Set aside money within an account for a purpose — like $50/mo for car maintenance — and record every add or pull with a date and note. Open an earmark to see its history.</p>
+      ${state.savingsAccounts.length ? `
+      <form id="earmarkForm" class="form-grid">
+        <div class="field"><label>Earmark</label><input name="name" required placeholder="e.g. Car maintenance"></div>
+        <div class="field"><label>In account</label><select name="acct">${state.savingsAccounts.map((a) => `<option value="${a.id}">${esc(a.name)}</option>`).join("")}</select></div>
+        <div class="field"><label>Planned / month</label><input name="monthly" type="number" step="1" min="0" value="0" style="width:100px"></div>
+        <button class="primary-btn">Add earmark</button>
+      </form>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Earmark</th><th>Account</th><th class="num">Balance</th><th class="num">Planned / mo</th><th></th></tr></thead>
+        <tbody>
+          ${state.savingsAccounts.flatMap((a) => a.earmarks.map((e) => `<tr>
+            <td>${esc(e.name)}</td>
+            <td class="secondary">${esc(a.name)}</td>
+            <td class="num">${fmtMoney(earmarkBalance(e), true)}</td>
+            <td class="num">${e.monthly > 0 ? fmtMoney(e.monthly) : '<span class="muted">—</span>'}</td>
+            <td class="row-actions"><button data-open-em="${a.id}:${e.id}">Open</button><button data-del-em="${a.id}:${e.id}">Delete</button></td>
+          </tr>`)).join("") || `<tr><td colspan="5" class="empty-note">No earmarks yet.</td></tr>`}
+        </tbody>
+      </table></div>` : `<p class="empty-note">Add a savings account above first.</p>`}
+    </div>
+    <div class="card">
       <h2>Savings goals</h2>
       <p class="card-note">Update "saved so far" monthly. Months remaining assumes the monthly contribution holds.</p>
       <form id="goalForm" class="form-grid">
@@ -1546,7 +1826,7 @@ function renderGoals(el) {
     const rec = { name: f.get("name").trim(), owner: f.get("owner"), balance: +f.get("balance") || 0, notes: f.get("notes").trim() };
     if (!rec.name) return;
     if (ea) { Object.assign(ea, rec); editing.account = null; }
-    else state.savingsAccounts.push({ id: uid(), ...rec });
+    else state.savingsAccounts.push({ id: uid(), ...rec, earmarks: [] });
     save(); renderAll();
   });
   el.querySelector("#cancelAccount")?.addEventListener("click", () => { editing.account = null; renderAll(); });
@@ -1565,6 +1845,29 @@ function renderGoals(el) {
     const a = state.savingsAccounts.find((x) => x.id === inp.dataset.id);
     if (!a) return;
     a.balance = Math.max(0, +inp.value || 0);
+    save(); renderAll();
+  }));
+
+  // Earmarks
+  el.querySelector("#earmarkForm")?.addEventListener("submit", (ev) => {
+    ev.preventDefault();
+    const f = new FormData(ev.target);
+    const acct = state.savingsAccounts.find((a) => a.id === f.get("acct"));
+    const name = f.get("name").trim();
+    if (!acct || !name) return;
+    acct.earmarks.push({ id: uid(), name, monthly: Math.max(0, +f.get("monthly") || 0), entries: [] });
+    save(); renderAll();
+  });
+  el.querySelectorAll("[data-open-em]").forEach((b) => b.addEventListener("click", () => {
+    const [acctId, emId] = b.dataset.openEm.split(":");
+    openEarmarkModal(acctId, emId);
+  }));
+  el.querySelectorAll("[data-del-em]").forEach((b) => b.addEventListener("click", () => {
+    const [acctId, emId] = b.dataset.delEm.split(":");
+    const acct = state.savingsAccounts.find((a) => a.id === acctId);
+    const em = acct?.earmarks.find((e) => e.id === emId);
+    if (!em || !confirm(`Delete the "${em.name}" earmark? Its history goes with it (the account balance is not changed).`)) return;
+    acct.earmarks = acct.earmarks.filter((e) => e.id !== emId);
     save(); renderAll();
   }));
 }
