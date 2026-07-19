@@ -159,6 +159,150 @@ async function syncAppend(newRows) {
   badgeState = "ok"; setBadge();
 }
 
+// ---------- Attachments (same IndexedDB store + attachment gist as the full app) ----------
+
+const ATT_MARKER = "household-finance-attachments.marker";
+
+function idbOpen() {
+  return new Promise((res, rej) => {
+    const r = indexedDB.open("household-finance-files", 1);
+    r.onupgradeneeded = () => r.result.createObjectStore("files");
+    r.onsuccess = () => res(r.result);
+    r.onerror = () => rej(r.error);
+  });
+}
+async function idbPut(id, val) {
+  const db = await idbOpen();
+  return new Promise((res, rej) => {
+    const tx = db.transaction("files", "readwrite");
+    tx.objectStore("files").put(val, id);
+    tx.oncomplete = res;
+    tx.onerror = () => rej(tx.error);
+  });
+}
+async function idbGet(id) {
+  const db = await idbOpen();
+  return new Promise((res, rej) => {
+    const q = db.transaction("files").objectStore("files").get(id);
+    q.onsuccess = () => res(q.result);
+    q.onerror = () => rej(q.error);
+  });
+}
+async function idbDel(id) {
+  const db = await idbOpen();
+  return new Promise((res, rej) => {
+    const tx = db.transaction("files", "readwrite");
+    tx.objectStore("files").delete(id);
+    tx.oncomplete = res;
+    tx.onerror = () => rej(tx.error);
+  });
+}
+
+const fileToDataUrl = (file) => new Promise((res, rej) => {
+  const r = new FileReader();
+  r.onload = () => res(r.result);
+  r.onerror = () => rej(r.error);
+  r.readAsDataURL(file);
+});
+
+async function prepareAttachment(file) {
+  if (file.type.startsWith("image/")) {
+    const url = await fileToDataUrl(file);
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = () => rej(new Error("Couldn't read that image.")); img.src = url; });
+    const scale = Math.min(1, 1600 / Math.max(img.width, img.height));
+    if (scale === 1 && file.size < 600 * 1024) return url;
+    const c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(img.width * scale));
+    c.height = Math.max(1, Math.round(img.height * scale));
+    c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+    return c.toDataURL("image/jpeg", 0.8);
+  }
+  if (file.size > 2 * 1024 * 1024) throw new Error(`"${file.name}" is over 2 MB — take a photo of it instead.`);
+  return fileToDataUrl(file);
+}
+
+async function attachmentGistId() {
+  if (syncCfg.attGistId) return syncCfg.attGistId;
+  const list = await fetch(`${GH_API}/gists?per_page=100`, { headers: ghHeaders(syncCfg.token) });
+  if (!list.ok) throw new Error(`Listing gists failed (${list.status})`);
+  const existing = (await list.json()).find((g) => g.files && ATT_MARKER in g.files);
+  let id;
+  if (existing) {
+    id = existing.id;
+  } else {
+    const created = await fetch(`${GH_API}/gists`, {
+      method: "POST",
+      headers: { ...ghHeaders(syncCfg.token), "Content-Type": "application/json" },
+      body: JSON.stringify({ description: "Household Finance attachments", public: false, files: { [ATT_MARKER]: { content: "attachment store — managed by the app" } } }),
+    });
+    if (!created.ok) throw new Error(`Creating the attachment store failed (${created.status})`);
+    id = (await created.json()).id;
+  }
+  syncCfg.attGistId = id;
+  saveSyncCfg();
+  return id;
+}
+
+async function uploadPendingAttachments() {
+  if (!isConnected()) return;
+  for (const row of state.spending) {
+    for (const att of row.attachments || []) {
+      if (att.up) continue;
+      const data = await idbGet(att.id).catch(() => null);
+      if (!data) continue;
+      try {
+        const gid = await attachmentGistId();
+        const res = await fetch(`${GH_API}/gists/${gid}`, {
+          method: "PATCH",
+          headers: { ...ghHeaders(syncCfg.token), "Content-Type": "application/json" },
+          body: JSON.stringify({ files: { [`att-${att.id}.txt`]: { content: data } } }),
+        });
+        if (res.ok) { att.up = true; persist(); }
+      } catch { /* retried after the next save */ }
+    }
+  }
+}
+
+// Photos picked but not yet saved with an expense.
+let draftAtts = [];
+
+function renderAttChips() {
+  for (const boxId of ["singleAtts", "splitAtts"]) {
+    const box = $(boxId);
+    if (!box) continue;
+    box.innerHTML = draftAtts.map((a) => `<span class="q-chip">${esc(a.name)}<button type="button" data-chip="${a.id}">✕</button></span>`).join("");
+    box.querySelectorAll("[data-chip]").forEach((btn) => btn.addEventListener("click", () => {
+      draftAtts = draftAtts.filter((a) => a.id !== btn.dataset.chip);
+      idbDel(btn.dataset.chip).catch(() => {});
+      renderAttChips();
+    }));
+  }
+}
+
+async function pickFiles(fileList) {
+  for (const file of fileList) {
+    try {
+      const data = await prepareAttachment(file);
+      const id = uid();
+      await idbPut(id, data);
+      draftAtts.push({ id, name: file.name });
+    } catch (err) {
+      alert(err.message || String(err));
+    }
+  }
+  renderAttChips();
+}
+
+// Move the picked photos onto a saved expense row.
+function takeDraftAtts() {
+  if (!draftAtts.length) return null;
+  const atts = draftAtts.map((a) => ({ id: a.id, name: a.name, up: false }));
+  draftAtts = [];
+  renderAttChips();
+  return atts;
+}
+
 // Gross-up: spread tax across the taxable lines (or all lines if none marked)
 // and fold each line's share in. Same rule as the full app.
 function computeSplit(d) {
@@ -193,7 +337,7 @@ function renderRecent() {
   list.innerHTML = rows.map((r) => `<li>
     <span class="q-r-main">
       <span class="q-r-desc">${esc(r.desc || r.category)}</span>
-      <span class="q-r-cat">${esc(r.category)} · ${esc(r.date)}</span>
+      <span class="q-r-cat">${esc(r.category)} · ${esc(r.date)}${r.attachments?.length ? ` · <span class="q-r-clip">📎 ${r.attachments.length}</span>` : ""}</span>
     </span>
     <span class="q-r-amt">${fmtMoney(r.amount)}</span>
   </li>`).join("");
@@ -269,6 +413,7 @@ async function commitRows(rows) {
       await syncAppend(rows);
       renderRecent();
       toast(many ? `Saved & synced ${rows.length} lines ✓` : "Saved & synced ✓");
+      uploadPendingAttachments().then(renderRecent); // photos follow in the background
     } catch (e) {
       state.updatedAt = Date.now(); persist(); // mark dirty for a later sync
       badgeState = "error"; setBadge();
@@ -290,10 +435,17 @@ $("expForm").addEventListener("submit", async (ev) => {
     date: $("date").value || new Date().toISOString().slice(0, 10),
     desc, category: $("category").value, account: $("account").value, amount,
   };
+  const atts = takeDraftAtts();
+  if (atts) rec.attachments = atts;
   $("amount").value = "";
   $("desc").value = "";
   $("amount").focus();
   await commitRows([rec]);
+});
+
+$("singleFile").addEventListener("change", async (ev) => {
+  await pickFiles(ev.target.files);
+  ev.target.value = "";
 });
 
 // ---------- Split receipt (phone) ----------
@@ -344,10 +496,15 @@ function renderSplit() {
       </div>
     </div>
     <div class="rc-summary" id="spSummary"></div>
+    <div class="q-field">
+      <label class="q-btn ghost q-attach">📎 Add photo of receipt<input id="splitFile" type="file" accept="image/*,application/pdf" multiple hidden></label>
+      <div id="splitAtts" class="q-chips"></div>
+    </div>
     <button type="button" class="q-add" id="spSave">Save receipt</button>
   </div>`;
   bindSplit();
   updateSplitPreview();
+  renderAttChips();
 }
 
 function readSplitFromDom() {
@@ -407,9 +564,16 @@ function bindSplit() {
       category: l.category, account: splitDraft.account,
       amount: Math.round(l.total * 100) / 100,
     }));
+    // The receipt photo rides on the first line of the purchase.
+    const atts = takeDraftAtts();
+    if (atts) rows[0].attachments = atts;
     splitDraft = freshSplit();
     renderSplit();
     await commitRows(rows);
+  });
+  s.querySelector("#splitFile").addEventListener("change", async (ev) => {
+    await pickFiles(ev.target.files);
+    ev.target.value = "";
   });
 }
 

@@ -55,6 +55,11 @@
     .sp-taxwrap { display: flex; align-items: center; gap: 4px; font-size: 13px; color: var(--text-secondary); white-space: nowrap; }
     .sp-del { background: none; border: none; color: var(--text-muted); font-size: 16px; cursor: pointer; padding: 4px; }
     .sp-withtax { font-size: 12px; }
+    .q-attach { display: block; text-align: center; cursor: pointer; }
+    .q-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+    .q-chip { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; font-size: 13px; background: var(--page); border: 1px solid var(--axis); border-radius: 999px; padding: 5px 10px; color: var(--text-secondary); }
+    .q-chip button { background: none; border: none; cursor: pointer; color: var(--text-muted); font-size: 13px; padding: 0; }
+    .q-r-clip { font-size: 12px; color: var(--text-muted); }
     #splitSection #spTaxMode { width: auto; flex: 0 0 auto; }
     #splitSection #spTaxValue { width: auto; flex: 1; }
   </style>
@@ -94,6 +99,10 @@
         <div class="q-field">
           <label for="date">Date</label>
           <input id="date" name="date" type="date" required />
+        </div>
+        <div class="q-field">
+          <label class="q-btn ghost q-attach">📎 Add photo of receipt / invoice<input id="singleFile" type="file" accept="image/*,application/pdf" multiple hidden></label>
+          <div id="singleAtts" class="q-chips"></div>
         </div>
         <button class="q-add" type="submit">Add expense</button>
       </form>
