@@ -630,6 +630,17 @@ function ensureModalStyles() {
     .att-upload{display:inline-block;margin-top:12px;cursor:pointer}
     #attPreview{margin-top:12px}
     #attPreview img{max-width:100%;border-radius:10px;border:1px solid var(--border,rgba(0,0,0,.1))}
+    .att-box .form-grid{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-end;margin:12px 0}
+    .att-box .field{display:flex;flex-direction:column;gap:3px}
+    .att-box .field label{font-size:12px;color:var(--text-secondary,#555)}
+    .att-box input,.att-box select{font:inherit;font-size:14px;color:var(--text-primary,#111);background:var(--page,#f6f6f4);border:1px solid var(--axis,#b5b5b0);border-radius:8px;padding:8px 10px;min-width:0}
+    .att-box input:focus,.att-box select:focus{outline:2px solid var(--series-1,#2a78d6);outline-offset:1px;border-color:transparent}
+    .att-box .primary-btn{font:inherit;font-size:14px;font-weight:600;background:var(--series-1,#2a78d6);color:#fff;border:none;border-radius:8px;padding:8px 16px;cursor:pointer}
+    .att-box .secondary-btn{font:inherit;font-size:14px;background:none;border:1px solid var(--axis,#b5b5b0);color:var(--text-secondary,#555);border-radius:8px;padding:8px 14px;cursor:pointer}
+    .att-box .toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px}
+    .att-box .card-note{font-size:13px;color:var(--text-muted,#888);margin-bottom:10px}
+    .att-box .empty-note{color:var(--text-muted,#888);font-size:13.5px;padding:8px 0}
+    .att-box .ghost-btn{background:none;border:1px solid var(--border,rgba(0,0,0,.1));border-radius:8px;color:var(--text-secondary,#555);font-size:16px;padding:6px 10px;cursor:pointer}
   `;
   document.head.appendChild(s);
 }
